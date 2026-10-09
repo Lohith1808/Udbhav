@@ -42,6 +42,12 @@ const CitizenStatusTracker = React.lazy(
 const PanchayatEndorsementModal = React.lazy(
   () => import('./features/ingestion/components/PanchayatEndorsementModal')
 );
+const CSREscrowDashboard = React.lazy(
+  () => import('./features/governance/components/CSREscrowDashboard')
+);
+const StatewideGISCommandDashboard = React.lazy(
+  () => import('./features/governance/components/StatewideGISCommandDashboard')
+);
 import {
   createOfflineDraftSubmission,
   generateMaskedCitizenId,
@@ -85,6 +91,7 @@ import {
   ExternalLink,
   MessageSquare,
   GraduationCap,
+  Coins,
 } from 'lucide-react';
 
 /**
@@ -142,6 +149,9 @@ export const App: React.FC = () => {
   const [fontSize, setFontSize] = useState<'sm' | 'md' | 'lg'>('md');
   const [highContrast, setHighContrast] = useState<boolean>(false);
   const [activeNavTab, setActiveNavTab] = useState<string>('report');
+  const [simulatedRole, setSimulatedRole] = useState<
+    'FACULTY_MENTOR' | 'GOVT_ADMIN' | 'INDUSTRY_CSR' | 'ACCREDITED_EVALUATOR'
+  >('INDUSTRY_CSR');
 
   // Terminal form state for civic ledger
   const [rawPhoneInput, setRawPhoneInput] = useState<string>('9876543210');
@@ -693,6 +703,49 @@ export const App: React.FC = () => {
             </span>
             <span className="bg-amber-400 text-slate-950 px-1.5 py-0.2 text-[10px] font-mono font-black">
               70/30 Cap
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveNavTab('csr')}
+            className={`px-4 py-2 text-xs font-black uppercase tracking-wider flex items-center gap-2 transition-all cursor-pointer ${
+              activeNavTab === 'csr'
+                ? 'bg-[#1E6F50] text-[#F8E7A2] shadow-xs'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+            }`}
+          >
+            <Coins className="w-4 h-4 text-amber-300" />
+            <span>
+              {language === 'hi'
+                ? 'उद्योग एवं सीएसआर एस्क्रो (Shoe 4)'
+                : 'Industry CSR Escrow (Shoe 4)'}
+            </span>
+            <span className="bg-emerald-400 text-slate-950 px-1.5 py-0.2 text-[10px] font-mono font-black">
+              ₹1.5L
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveNavTab('gis');
+              setSimulatedRole('GOVT_ADMIN');
+            }}
+            className={`px-4 py-2 text-xs font-black uppercase tracking-wider flex items-center gap-2 transition-all cursor-pointer ${
+              activeNavTab === 'gis'
+                ? 'bg-[#0B2545] text-[#F8E7A2] border-b-2 border-amber-400 shadow-xs'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+            }`}
+          >
+            <MapPin className="w-4 h-4 text-emerald-400" />
+            <span>
+              {language === 'hi'
+                ? 'राज्यव्यापी जीआईएस कमान (Shoe 5)'
+                : 'Statewide GIS Command (Shoe 5)'}
+            </span>
+            <span className="bg-[#7A1B1B] text-white px-1.5 py-0.2 text-[10px] font-mono font-black">
+              24 Districts
             </span>
           </button>
         </div>
@@ -1273,6 +1326,36 @@ export const App: React.FC = () => {
             }
           >
             <FacultyMentorDashboard language={language} />
+          </React.Suspense>
+        ) : activeNavTab === 'csr' ? (
+          /* CSR Escrow & Capital Management Desk (Shoe 4 - Task 3.2) */
+          <React.Suspense
+            fallback={
+              <div className="p-8 text-center text-slate-500 bg-white border border-slate-300">
+                Loading CSR Escrow Console...
+              </div>
+            }
+          >
+            <CSREscrowDashboard
+              userRole={simulatedRole}
+              onRoleChange={setSimulatedRole}
+              language={language}
+            />
+          </React.Suspense>
+        ) : activeNavTab === 'gis' ? (
+          /* Statewide GIS Command & Governance Desk (Shoe 5 - Task 3.5) */
+          <React.Suspense
+            fallback={
+              <div className="p-8 text-center text-slate-500 bg-white border border-slate-300">
+                Loading Statewide GIS Command Portal...
+              </div>
+            }
+          >
+            <StatewideGISCommandDashboard
+              userRole={simulatedRole}
+              onRoleChange={setSimulatedRole}
+              language={language}
+            />
           </React.Suspense>
         ) : (
           /* Two-Column Official Civic Ledger Content Layout */

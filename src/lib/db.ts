@@ -24,6 +24,14 @@ import {
   FACULTY_MAX_PENDING_QUEUE,
   MAX_BRIEF_BUDGET_INR,
 } from '../types/solver';
+import {
+  EscrowGrant,
+  SafetyValidation,
+  DistrictGISSummary,
+  TrancheStage,
+  EscrowStatus,
+  Tier2EvaluatorAgency,
+} from '../types/governance';
 
 /**
  * Custom error classes for fine-grained client-side storage diagnostics
@@ -59,6 +67,9 @@ export class UdbhavDatabase extends Dexie {
   studentTeams!: Table<StudentTeam, string>;
   facultyMentors!: Table<FacultyMentorProfile, string>;
   technicalQueries!: Table<PanchayatTechnicalQuery, string>;
+  escrowGrants!: Table<EscrowGrant, string>;
+  safetyValidations!: Table<SafetyValidation, string>;
+  districtGISMetrics!: Table<DistrictGISSummary, number>;
 
   constructor() {
     super('UdbhavDatabase');
@@ -75,6 +86,13 @@ export class UdbhavDatabase extends Dexie {
       studentTeams: 'id, briefId, mentorStatus, leadStudentId, currentMilestone',
       facultyMentors: 'id, institution, activeProjectsCount, slotType',
       technicalQueries: 'id, teamId, masterIssueId, status, createdAt',
+    });
+
+    // Schema version 3 (Sprint 3 - Task 3.1: Governance & Capital)
+    this.version(3).stores({
+      escrowGrants: 'id, masterIssueId, teamId, sponsorId, mcaScheduleVIICategory',
+      safetyValidations: 'id, masterIssueId, teamId, isPublicPilotCleared',
+      districtGISMetrics: 'districtCode, distressIntensityLevel',
     });
   }
 }
@@ -515,7 +533,7 @@ export const INITIAL_ENGINEERING_BRIEFS: EngineeringProblemBrief[] = [
 let isSeedingSolverData = false;
 
 /**
- * Seeds initial academic problem briefs and faculty profiles if tables are empty.
+ * Seeds initial academic problem briefs, faculty profiles, and default student teams if tables are empty.
  * Idempotent and concurrency-guarded.
  */
 export async function seedSolverDataIfEmpty(): Promise<void> {
@@ -532,6 +550,11 @@ export async function seedSolverDataIfEmpty(): Promise<void> {
     if (facultyCount === 0) {
       await db.facultyMentors.bulkPut(INITIAL_FACULTY_MENTORS);
     }
+
+    const teamCount = await db.studentTeams.count();
+    if (teamCount === 0) {
+      await db.studentTeams.bulkPut(INITIAL_STUDENT_TEAMS);
+    }
   } catch (error) {
     console.error('Error seeding initial solver data:', error);
   } finally {
@@ -539,9 +562,44 @@ export async function seedSolverDataIfEmpty(): Promise<void> {
   }
 }
 
+let isSeedingGovernanceData = false;
+
+/**
+ * Seeds initial CSR escrow grants, safety validations, and district GIS summary metrics.
+ * Idempotent and concurrency-guarded.
+ */
+export async function seedGovernanceDataIfEmpty(): Promise<void> {
+  if (isSeedingGovernanceData) return;
+  try {
+    isSeedingGovernanceData = true;
+
+    await seedSolverDataIfEmpty();
+
+    const grantCount = await db.escrowGrants.count();
+    if (grantCount === 0) {
+      await db.escrowGrants.bulkPut(INITIAL_ESCROW_GRANTS);
+    }
+
+    const validationCount = await db.safetyValidations.count();
+    if (validationCount === 0) {
+      await db.safetyValidations.bulkPut(INITIAL_SAFETY_VALIDATIONS);
+    }
+
+    const districtCount = await db.districtGISMetrics.count();
+    if (districtCount === 0) {
+      await db.districtGISMetrics.bulkPut(INITIAL_DISTRICT_GIS_METRICS);
+    }
+  } catch (error) {
+    console.error('Error seeding initial governance & capital data:', error);
+  } finally {
+    isSeedingGovernanceData = false;
+  }
+}
+
 // Hook into database ready lifecycle to ensure initial mock data is populated
 db.on('ready', async () => {
   await seedSolverDataIfEmpty();
+  await seedGovernanceDataIfEmpty();
 });
 
 /**
@@ -833,3 +891,450 @@ export async function getTechnicalQueries(teamId?: string): Promise<PanchayatTec
     return handleStorageError(error, 'getTechnicalQueries');
   }
 }
+
+// ============================================================================
+// SPRINT 3 — TASK 3.1: GOVERNANCE & CAPITAL REPOSITORY HELPERS & SEED DATA
+// ============================================================================
+
+/**
+ * Initial registered student solver team linked to the Dumka Water Challenge
+ */
+export const INITIAL_STUDENT_TEAMS: StudentTeam[] = [
+  {
+    id: 'TEAM-JH-SOLVER-01',
+    briefId: 'BRIEF-JH-2026-001',
+    teamName: 'Jal-Shuddhi Innovators',
+    leadStudentId: 'JH-STU-BITS-2201',
+    leadStudentName: 'Aakash Kumar Mahato',
+    leadCollege: 'BIT Sindri',
+    roster: [
+      {
+        studentId: 'JH-STU-BITS-2201',
+        name: 'Aakash Kumar Mahato',
+        department: 'CHEMICAL',
+        year: 3,
+        roleDescription: 'Media adsorption lead & chemical filtration sizing',
+      },
+      {
+        studentId: 'JH-STU-BITS-2215',
+        name: 'Anjali Soren',
+        department: 'CIVIL',
+        year: 3,
+        roleDescription: 'Gravity apron CAD & structural pipe casing',
+      },
+      {
+        studentId: 'JH-STU-BITS-2244',
+        name: 'Rohan Gupta',
+        department: 'CSE',
+        year: 2,
+        roleDescription: 'IoT optical turbidity sensor & Panchayat field telemetry',
+      },
+    ],
+    assignedMentorId: 'FAC-JH-BITS-01',
+    mentorStatus: 'APPROVED',
+    mentorRequestTimestamp: 1773125000000,
+    repoUrl: 'github.com/jh-dhte-capstone/jal-shuddhi-dumka',
+    currentMilestone: 2,
+  },
+];
+
+/**
+ * Initial seeded Escrow Grant linked to the Dumka Water Challenge funded by Tata Steel CSR
+ * ₹1,50,000 committed, Tranche 1 disbursed, Tranche 2 under review
+ */
+export const INITIAL_ESCROW_GRANTS: EscrowGrant[] = [
+  {
+    id: 'GRANT-JH-CSR-2026-001',
+    masterIssueId: 'JH-2026-M-849201',
+    teamId: 'TEAM-JH-SOLVER-01',
+    sponsorId: 'SPONSOR-TATA-STEEL-01',
+    sponsorName: 'Tata Steel CSR Foundation',
+    totalCommittedINR: 150000,
+    mcaScheduleVIICategory: 'WATER_AND_SANITATION',
+    sdgGoalNumber: 6,
+    tranches: [
+      {
+        stage: 'TRANCHE_1_BOM',
+        percentage: 30,
+        amountINR: 45000,
+        status: 'DISBURSED',
+        deliverableDescription: 'BOM Procurement & Sand/Iron Media Architecture validation under ₹2,500 budget limit.',
+        deliverableProofUrl: 'https://udbhav.jharkhand.gov.in/proofs/bom-receipts-t1.pdf',
+        facultySignoffAt: 1773200000000,
+        disbursedAt: 1773250000000,
+      },
+      {
+        stage: 'TRANCHE_2_LAB',
+        percentage: 30,
+        amountINR: 45000,
+        status: 'LOCKED',
+        deliverableDescription: 'Lab bench prototyping & WHO arsenic filtration benchmark validation (<0.01 mg/L).',
+        deliverableProofUrl: 'https://udbhav.jharkhand.gov.in/proofs/lab-telemetry-test-report.pdf',
+      },
+      {
+        stage: 'TRANCHE_3_FIELD',
+        percentage: 40,
+        amountINR: 60000,
+        status: 'LOCKED',
+        deliverableDescription: 'Panchayat ground installation at Dumka Sadar, BDO handover, and 30-day water safety telemetry.',
+      },
+    ],
+    createdAt: 1773180000000,
+  },
+];
+
+/**
+ * Initial seeded Safety Validation showing Tier 1 lab pass and pending Tier 2 testing at CSIR-CIMFR Dhanbad
+ */
+export const INITIAL_SAFETY_VALIDATIONS: SafetyValidation[] = [
+  {
+    id: 'SAFE-JH-2026-001',
+    masterIssueId: 'JH-2026-M-849201',
+    teamId: 'TEAM-JH-SOLVER-01',
+    tier1FacultyPassed: true,
+    tier1TelemetryReportUrl: 'https://udbhav.jharkhand.gov.in/certs/bit-sindri-tier1-safety.pdf',
+    tier1SignedAt: 1773220000000,
+    tier1HODName: 'Dr. R. K. Singh (BIT Sindri)',
+    tier2EvaluatorAgency: 'CSIR_CIMFR_DHANBAD',
+    tier2BisPassed: false,
+    tier2BisStandardCode: 'IS 10500:2012 Drinking Water Specification',
+    isPublicPilotCleared: false,
+  },
+];
+
+/**
+ * Initial summary metrics across 5 key Jharkhand districts
+ */
+export const INITIAL_DISTRICT_GIS_METRICS: DistrictGISSummary[] = [
+  {
+    districtCode: 3401,
+    districtName: 'Ranchi',
+    totalIssuesReported: 48,
+    endorsedMasterCount: 36,
+    activeCapstonesCount: 12,
+    verifiedDeploymentsCount: 7,
+    distressIntensityLevel: 'HIGH',
+    averageResolutionDays: 18,
+  },
+  {
+    districtCode: 3402,
+    districtName: 'Dhanbad',
+    totalIssuesReported: 54,
+    endorsedMasterCount: 41,
+    activeCapstonesCount: 14,
+    verifiedDeploymentsCount: 9,
+    distressIntensityLevel: 'ACUTE',
+    averageResolutionDays: 22,
+  },
+  {
+    districtCode: 3403,
+    districtName: 'Dumka',
+    totalIssuesReported: 39,
+    endorsedMasterCount: 28,
+    activeCapstonesCount: 9,
+    verifiedDeploymentsCount: 4,
+    distressIntensityLevel: 'ACUTE',
+    averageResolutionDays: 26,
+  },
+  {
+    districtCode: 3404,
+    districtName: 'East Singhbhum',
+    totalIssuesReported: 32,
+    endorsedMasterCount: 24,
+    activeCapstonesCount: 8,
+    verifiedDeploymentsCount: 6,
+    distressIntensityLevel: 'MEDIUM',
+    averageResolutionDays: 15,
+  },
+  {
+    districtCode: 3405,
+    districtName: 'Hazaribagh',
+    totalIssuesReported: 27,
+    endorsedMasterCount: 19,
+    activeCapstonesCount: 6,
+    verifiedDeploymentsCount: 3,
+    distressIntensityLevel: 'LOW',
+    averageResolutionDays: 14,
+  },
+];
+
+/**
+ * Saves or updates an Escrow Grant committed by Industry/CSR sponsors.
+ */
+export async function saveEscrowGrant(grant: EscrowGrant): Promise<void> {
+  try {
+    await db.escrowGrants.put(grant);
+  } catch (error) {
+    return handleStorageError(error, 'saveEscrowGrant');
+  }
+}
+
+/**
+ * Retrieves the escrow grant committed for a specific student team.
+ */
+export async function getEscrowGrantByTeam(teamId: string): Promise<EscrowGrant | undefined> {
+  try {
+    await seedGovernanceDataIfEmpty();
+    return await db.escrowGrants.where('teamId').equals(teamId).first();
+  } catch (error) {
+    return handleStorageError(error, 'getEscrowGrantByTeam');
+  }
+}
+
+/**
+ * Retrieves an escrow grant by unique identifier.
+ */
+export async function getEscrowGrantById(id: string): Promise<EscrowGrant | undefined> {
+  try {
+    await seedGovernanceDataIfEmpty();
+    return await db.escrowGrants.get(id);
+  } catch (error) {
+    return handleStorageError(error, 'getEscrowGrantById');
+  }
+}
+
+/**
+ * Retrieves all escrow grants registered in the system.
+ */
+export async function getAllEscrowGrants(): Promise<EscrowGrant[]> {
+  try {
+    await seedGovernanceDataIfEmpty();
+    return await db.escrowGrants.toArray();
+  } catch (error) {
+    return handleStorageError(error, 'getAllEscrowGrants');
+  }
+}
+
+/**
+ * Updates an escrow tranche status with strict role-based verification rules:
+ * - Tranche 1 (BOM): Requires FACULTY sign-off.
+ * - Tranche 2 (LAB): Requires FACULTY sign-off with verified telemetry proof URL.
+ * - Tranche 3 (FIELD): Requires BOTH FACULTY and GOVT sign-offs before approval / disbursement.
+ */
+export async function updateTrancheStatus(
+  grantId: string,
+  stage: TrancheStage,
+  status: EscrowStatus,
+  signoffRole: 'FACULTY' | 'GOVT' | 'INDUSTRY_CSR',
+  rejectionReason?: string
+): Promise<void> {
+  try {
+    await seedGovernanceDataIfEmpty();
+
+    const grant = await db.escrowGrants.get(grantId);
+    if (!grant) {
+      throw new Error(`Escrow grant with ID "${grantId}" was not found.`);
+    }
+
+    const trancheIndex = grant.tranches.findIndex((t) => t.stage === stage);
+    if (trancheIndex === -1) {
+      throw new Error(`Tranche stage "${stage}" not found on grant "${grantId}".`);
+    }
+
+    const tranche = { ...grant.tranches[trancheIndex] };
+    const now = Date.now();
+
+    // Check Dispute Flagging by Industry / Sponsor
+    if (status === 'DISPUTED') {
+      tranche.status = 'DISPUTED';
+      if (rejectionReason) {
+        tranche.rejectionReason = rejectionReason;
+      }
+    } else if (stage === 'TRANCHE_1_BOM') {
+      // Enforce Role & Proof Constraints per Stage
+      if (signoffRole !== 'FACULTY') {
+        throw new Error('Guardrail Violation: Tranche 1 (BOM) requires Faculty Mentor sign-off.');
+      }
+      tranche.facultySignoffAt = now;
+      tranche.status = status;
+      if (status === 'DISBURSED') {
+        tranche.disbursedAt = now;
+      }
+    } else if (stage === 'TRANCHE_2_LAB') {
+      if (signoffRole !== 'FACULTY') {
+        throw new Error('Guardrail Violation: Tranche 2 (Lab Bench) requires Faculty Mentor sign-off.');
+      }
+      if (!tranche.deliverableProofUrl || tranche.deliverableProofUrl.trim() === '') {
+        throw new Error(
+          'Guardrail Violation: Tranche 2 requires verified telemetry proof URL before faculty sign-off.'
+        );
+      }
+      tranche.facultySignoffAt = now;
+      tranche.status = status;
+      if (status === 'DISBURSED') {
+        tranche.disbursedAt = now;
+      }
+    } else if (stage === 'TRANCHE_3_FIELD') {
+      if (signoffRole === 'FACULTY') {
+        tranche.facultySignoffAt = now;
+      } else if (signoffRole === 'GOVT') {
+        tranche.govtSignoffAt = now;
+      }
+
+      // Tranche 3 requires both FACULTY and GOVT approvals to transition to APPROVED or DISBURSED
+      const hasDualSignoffs = Boolean(tranche.facultySignoffAt && tranche.govtSignoffAt);
+      if (status === 'APPROVED' || status === 'DISBURSED') {
+        if (!hasDualSignoffs) {
+          // If only 1 signature recorded so far, keep in locked/pending state while recording timestamp
+          tranche.status = 'LOCKED';
+        } else {
+          tranche.status = status;
+          if (status === 'DISBURSED') {
+            tranche.disbursedAt = now;
+          }
+        }
+      } else {
+        tranche.status = status;
+      }
+    }
+
+    grant.tranches[trancheIndex] = tranche;
+    await db.escrowGrants.put(grant);
+  } catch (error) {
+    return handleStorageError(error, 'updateTrancheStatus');
+  }
+}
+
+/**
+ * Saves or updates a 2-Tier Hardware Safety Validation record.
+ */
+export async function saveSafetyValidation(val: SafetyValidation): Promise<void> {
+  try {
+    await db.safetyValidations.put(val);
+  } catch (error) {
+    return handleStorageError(error, 'saveSafetyValidation');
+  }
+}
+
+/**
+ * Retrieves the safety validation record for a specific student team.
+ */
+export async function getSafetyValidation(teamId: string): Promise<SafetyValidation | undefined> {
+  try {
+    await seedGovernanceDataIfEmpty();
+    return await db.safetyValidations.where('teamId').equals(teamId).first();
+  } catch (error) {
+    return handleStorageError(error, 'getSafetyValidation');
+  }
+}
+
+/**
+ * Retrieves a safety validation record by unique identifier.
+ */
+export async function getSafetyValidationById(id: string): Promise<SafetyValidation | undefined> {
+  try {
+    await seedGovernanceDataIfEmpty();
+    return await db.safetyValidations.get(id);
+  } catch (error) {
+    return handleStorageError(error, 'getSafetyValidationById');
+  }
+}
+
+/**
+ * Retrieves all registered safety validations across Jharkhand student capstones.
+ */
+export async function getAllSafetyValidations(): Promise<SafetyValidation[]> {
+  try {
+    await seedGovernanceDataIfEmpty();
+    return await db.safetyValidations.toArray();
+  } catch (error) {
+    return handleStorageError(error, 'getAllSafetyValidations');
+  }
+}
+
+/**
+ * Signs off on Tier 1 Academic Lab Bench clearance by Faculty Supervisor / HOD.
+ */
+export async function signTier1Safety(
+  validationId: string,
+  hodName: string,
+  telemetryReportUrl: string
+): Promise<void> {
+  try {
+    await seedGovernanceDataIfEmpty();
+
+    const record = await db.safetyValidations.get(validationId);
+    if (!record) {
+      throw new Error(`Safety validation record with ID "${validationId}" was not found.`);
+    }
+
+    const now = Date.now();
+    await db.safetyValidations.update(validationId, {
+      tier1FacultyPassed: true,
+      tier1HODName: hodName,
+      tier1TelemetryReportUrl: telemetryReportUrl,
+      tier1SignedAt: now,
+    });
+  } catch (error) {
+    return handleStorageError(error, 'signTier1Safety');
+  }
+}
+
+/**
+ * Certifies Tier 2 Statutory BIS / NABL laboratory safety (e.g. CSIR-CIMFR Dhanbad).
+ * Transitions tier2BisPassed to true and generates verifiable DC Pilot Authorization Token.
+ */
+export async function certifyTier2Safety(
+  validationId: string,
+  evaluatorAgency: string,
+  bisStandard: string,
+  certificateUrl?: string
+): Promise<void> {
+  try {
+    await seedGovernanceDataIfEmpty();
+
+    const record = await db.safetyValidations.get(validationId);
+    if (!record) {
+      throw new Error(`Safety validation record with ID "${validationId}" was not found.`);
+    }
+
+    if (!record.tier1FacultyPassed) {
+      throw new Error(
+        'Guardrail Violation: Cannot certify Tier 2 regulatory safety without prior Tier 1 Faculty Lab clearance.'
+      );
+    }
+
+    const now = Date.now();
+    const tokenSuffix = crypto.randomUUID().slice(0, 4).toUpperCase();
+    const dcPermitQR = `JH-DC-PILOT-PERMIT-2026-${tokenSuffix}`;
+
+    await db.safetyValidations.update(validationId, {
+      tier2EvaluatorAgency: evaluatorAgency as Tier2EvaluatorAgency,
+      tier2BisStandardCode: bisStandard,
+      tier2BisPassed: true,
+      tier2CertifiedAt: now,
+      isPublicPilotCleared: true,
+      clearedAt: now,
+      dcPilotPermitQR: dcPermitQR,
+      tier2TestCertificateUrl:
+        certificateUrl ||
+        `https://udbhav.jharkhand.gov.in/certs/tier2-${evaluatorAgency.toLowerCase()}-${tokenSuffix}.pdf`,
+    });
+  } catch (error) {
+    return handleStorageError(error, 'certifyTier2Safety');
+  }
+}
+
+/**
+ * Retrieves district GIS summary metrics across Jharkhand districts for spatial telemetry.
+ */
+export async function getDistrictGISMetrics(): Promise<DistrictGISSummary[]> {
+  try {
+    await seedGovernanceDataIfEmpty();
+    return await db.districtGISMetrics.toArray();
+  } catch (error) {
+    return handleStorageError(error, 'getDistrictGISMetrics');
+  }
+}
+
+/**
+ * Saves or updates a district GIS summary record.
+ */
+export async function saveDistrictGISSummary(summary: DistrictGISSummary): Promise<void> {
+  try {
+    await db.districtGISMetrics.put(summary);
+  } catch (error) {
+    return handleStorageError(error, 'saveDistrictGISSummary');
+  }
+}
+
