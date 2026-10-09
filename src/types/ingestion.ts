@@ -95,6 +95,7 @@ export interface OfflineDraftSubmission {
   lastSyncAttempt?: number; // Timestamp of last transmission attempt
   syncErrorMessage?: string; // Human-readable network/schema failure message
   masterLifecycleStatus?: IssueStatus; // Official 6-stage lifecycle state
+  status?: IssueStatus; // Lifecycle ticket status (alias of masterLifecycleStatus)
   severity?: SeverityLevel; // Statutory severity level endorsed by Panchayat
   affectedHouseholdCount?: number; // Estimated affected families verified on-site
   panchayatInspectorId?: string; // Unique Officer / BDO audit identifier

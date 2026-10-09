@@ -336,6 +336,7 @@ export async function endorseSubmission(
     }
 
     const updatedCount = await db.draftSubmissions.update(id, {
+      status: 'ENDORSED_MASTER',
       masterLifecycleStatus: 'ENDORSED_MASTER',
       severity,
       affectedHouseholdCount: Math.floor(affectedHouseholds),
@@ -362,6 +363,7 @@ export async function rejectSubmission(
 ): Promise<void> {
   try {
     const updatedCount = await db.draftSubmissions.update(id, {
+      status: 'REJECTED_SPAM',
       masterLifecycleStatus: 'REJECTED_SPAM',
       rejectionReason: reason.trim() || 'Non-actionable / out of jurisdiction',
       panchayatInspectorId: inspectorId || 'OFFICER-JH-BDO-01',
@@ -375,6 +377,107 @@ export async function rejectSubmission(
     return handleStorageError(error, 'rejectSubmission');
   }
 }
+
+/**
+ * Initial grassroots draft submissions for instant demo and cross-device queue review
+ */
+export const INITIAL_DRAFT_SUBMISSIONS: OfflineDraftSubmission[] = [
+  {
+    id: 'draft-grassroots-rnc-01',
+    timestamp: Date.now() - 3600000 * 4,
+    syncStatus: 'SYNCED',
+    status: 'REPORTED',
+    masterLifecycleStatus: 'REPORTED',
+    maskedCitizenId: 'Citizen #JH-8492',
+    phoneHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    isWhistleblower: false,
+    audioDurationSeconds: 14,
+    transcriptionDraft: 'चापाकल से लाल पानी आ रहा है और फ्लोराइड की गंध है। पूरे टोले के बच्चे पेट दर्द से ग्रसित हैं। तत्काल शुद्ध जल संयंत्र चाहिए।',
+    lgdLocation: {
+      state: 'Jharkhand',
+      districtName: 'Ranchi',
+      districtCode: 351,
+      blockName: 'Kanke',
+      blockCode: 3188,
+      panchayatName: 'Arsande',
+      panchayatCode: 114829,
+      latitude: 23.4385,
+      longitude: 85.3245,
+    },
+    rawCoordinates: {
+      latitude: 23.4385,
+      longitude: 85.3245,
+      accuracyMeters: 8,
+    },
+    aiTriageCategory: 'Water Infrastructure / Contamination',
+    intensityScore: 3,
+  },
+  {
+    id: 'draft-grassroots-orm-02',
+    timestamp: Date.now() - 3600000 * 18,
+    syncStatus: 'SYNCED',
+    status: 'AI_TRIAGED',
+    masterLifecycleStatus: 'AI_TRIAGED',
+    maskedCitizenId: 'Citizen #JH-3918',
+    phoneHash: 'a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e',
+    isWhistleblower: false,
+    audioDurationSeconds: 22,
+    transcriptionDraft: 'सब्जी उत्पादक किसानों के लिए कोल्ड स्टोरेज की कोई व्यवस्था नहीं है। टमाटर और हरी सब्जियां मंडी में सड़ जाती हैं। सौर ऊर्जा चालित सूक्ष्म शीतगृह की आवश्यकता है।',
+    lgdLocation: {
+      state: 'Jharkhand',
+      districtName: 'Ranchi',
+      districtCode: 351,
+      blockName: 'Ormanjhi',
+      blockCode: 3192,
+      panchayatName: 'Chutupalu',
+      panchayatCode: 114950,
+      latitude: 23.512,
+      longitude: 85.489,
+    },
+    rawCoordinates: {
+      latitude: 23.512,
+      longitude: 85.489,
+      accuracyMeters: 12,
+    },
+    aiTriageCategory: 'Agricultural Cold Storage & Solar',
+    intensityScore: 5,
+  },
+  {
+    id: 'draft-grassroots-ang-03',
+    timestamp: Date.now() - 3600000 * 72,
+    syncStatus: 'SYNCED',
+    status: 'ENDORSED_MASTER',
+    masterLifecycleStatus: 'ENDORSED_MASTER',
+    maskedCitizenId: 'Citizen #JH-7492',
+    phoneHash: '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8',
+    isWhistleblower: false,
+    audioDurationSeconds: 16,
+    transcriptionDraft: 'महुआ और वनोपज प्रसंस्करण हेतु ड्रायर एवं प्राथमिक मशीनरी उपलब्ध कराई जाए ताकि ग्रामीणों को उचित मूल्य मिल सके।',
+    lgdLocation: {
+      state: 'Jharkhand',
+      districtName: 'Ranchi',
+      districtCode: 351,
+      blockName: 'Angara',
+      blockCode: 3175,
+      panchayatName: 'Nawatoli',
+      panchayatCode: 114710,
+      latitude: 23.385,
+      longitude: 85.542,
+    },
+    rawCoordinates: {
+      latitude: 23.385,
+      longitude: 85.542,
+      accuracyMeters: 6,
+    },
+    aiTriageCategory: 'Forest Produce Processing & Value Addition',
+    intensityScore: 8,
+    severity: 'HIGH',
+    affectedHouseholdCount: 45,
+    panchayatInspectorId: 'Panchayat #JH-BDO-12',
+    panchayatInspectionNotes: 'स्थलीय निरीक्षण में पाया गया कि 45 वनवासी परिवारों की आजीविका महुआ प्रसंस्करण पर निर्भर है। राज्य तकनीकी विश्वविद्यालय से सौर ड्रायर मॉडल स्वीकृत कराने की अनुशंसा की जाती है।',
+    panchayatEndorsedAt: Date.now() - 3600000 * 48,
+  },
+];
 
 // ============================================================================
 // SPRINT 2 — TASK 2.1: ACADEMIC ENGINE REPOSITORY HELPERS & SEED DATA
@@ -596,8 +699,30 @@ export async function seedGovernanceDataIfEmpty(): Promise<void> {
   }
 }
 
+let isSeedingDraftData = false;
+
+/**
+ * Seeds initial grassroots submissions if draftSubmissions table is empty.
+ * Ensures the Panchayat Verification Desk is instantly testable and demonstrable.
+ */
+export async function seedDraftSubmissionsIfEmpty(): Promise<void> {
+  if (isSeedingDraftData) return;
+  try {
+    isSeedingDraftData = true;
+    const count = await db.draftSubmissions.count();
+    if (count === 0) {
+      await db.draftSubmissions.bulkPut(INITIAL_DRAFT_SUBMISSIONS);
+    }
+  } catch (error) {
+    console.error('Error seeding initial draft submissions:', error);
+  } finally {
+    isSeedingDraftData = false;
+  }
+}
+
 // Hook into database ready lifecycle to ensure initial mock data is populated
 db.on('ready', async () => {
+  await seedDraftSubmissionsIfEmpty();
   await seedSolverDataIfEmpty();
   await seedGovernanceDataIfEmpty();
 });
@@ -1115,8 +1240,10 @@ export async function updateTrancheStatus(
   grantId: string,
   stage: TrancheStage,
   status: EscrowStatus,
-  signoffRole: 'FACULTY' | 'GOVT' | 'INDUSTRY_CSR',
-  rejectionReason?: string
+  signoffRole: 'FACULTY' | 'GOVT' | 'PANCHAYAT' | 'INDUSTRY_CSR',
+  rejectionReason?: string,
+  signatoryName?: string,
+  deliverableProofUrl?: string
 ): Promise<void> {
   try {
     await seedGovernanceDataIfEmpty();
@@ -1134,6 +1261,10 @@ export async function updateTrancheStatus(
     const tranche = { ...grant.tranches[trancheIndex] };
     const now = Date.now();
 
+    if (deliverableProofUrl && deliverableProofUrl.trim()) {
+      tranche.deliverableProofUrl = deliverableProofUrl.trim();
+    }
+
     // Check Dispute Flagging by Industry / Sponsor
     if (status === 'DISPUTED') {
       tranche.status = 'DISPUTED';
@@ -1146,6 +1277,7 @@ export async function updateTrancheStatus(
         throw new Error('Guardrail Violation: Tranche 1 (BOM) requires Faculty Mentor sign-off.');
       }
       tranche.facultySignoffAt = now;
+      if (signatoryName) tranche.facultySignoffBy = signatoryName;
       tranche.status = status;
       if (status === 'DISBURSED') {
         tranche.disbursedAt = now;
@@ -1160,6 +1292,7 @@ export async function updateTrancheStatus(
         );
       }
       tranche.facultySignoffAt = now;
+      if (signatoryName) tranche.facultySignoffBy = signatoryName;
       tranche.status = status;
       if (status === 'DISBURSED') {
         tranche.disbursedAt = now;
@@ -1167,12 +1300,20 @@ export async function updateTrancheStatus(
     } else if (stage === 'TRANCHE_3_FIELD') {
       if (signoffRole === 'FACULTY') {
         tranche.facultySignoffAt = now;
-      } else if (signoffRole === 'GOVT') {
+        if (signatoryName) tranche.facultySignoffBy = signatoryName;
+      } else if (signoffRole === 'PANCHAYAT' || signoffRole === 'GOVT') {
+        tranche.panchayatSignoffAt = now;
         tranche.govtSignoffAt = now;
+        if (signatoryName) {
+          tranche.panchayatSignoffBy = signatoryName;
+          tranche.govtSignoffBy = signatoryName;
+        }
       }
 
-      // Tranche 3 requires both FACULTY and GOVT approvals to transition to APPROVED or DISBURSED
-      const hasDualSignoffs = Boolean(tranche.facultySignoffAt && tranche.govtSignoffAt);
+      // Tranche 3 requires both FACULTY and PANCHAYAT/GOVT approvals to transition to APPROVED or DISBURSED
+      const hasDualSignoffs = Boolean(
+        tranche.facultySignoffAt && (tranche.panchayatSignoffAt || tranche.govtSignoffAt)
+      );
       if (status === 'APPROVED' || status === 'DISBURSED') {
         if (!hasDualSignoffs) {
           // If only 1 signature recorded so far, keep in locked/pending state while recording timestamp

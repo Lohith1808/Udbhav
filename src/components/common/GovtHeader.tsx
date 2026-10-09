@@ -12,12 +12,15 @@
 
 import React, { useState, useEffect } from 'react';
 import { OfflineQueueBadge } from '../../features/ingestion/components/OfflineQueueBadge';
+import { useSession } from '../../context/SessionContext';
 import {
   Globe,
   SunMoon,
   Clock,
   ShieldCheck,
   Building,
+  UserCheck,
+  Sparkles,
 } from 'lucide-react';
 
 export interface GovtHeaderProps {
@@ -31,6 +34,7 @@ export interface GovtHeaderProps {
   onNavTabChange?: (tab: string) => void;
   isSyncing?: boolean;
   onSyncTrigger?: () => Promise<void> | void;
+  onOpenAiSettings?: () => void;
 }
 
 export const GovtHeader: React.FC<GovtHeaderProps> = ({
@@ -44,7 +48,9 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
   onNavTabChange,
   isSyncing,
   onSyncTrigger,
+  onOpenAiSettings,
 }) => {
+  const { session, openVerificationModal } = useSession();
   // Live IST Timestamp formatter
   const [currentIST, setCurrentIST] = useState<string>('');
 
@@ -167,12 +173,30 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
             <button
               type="button"
               onClick={() => onLanguageChange(language === 'hi' ? 'en' : 'hi')}
-              className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#138808] hover:bg-[#117a07] text-white font-bold text-[11px] border border-green-600 transition-colors shadow-2xs"
+              className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#138808] hover:bg-[#117a07] text-white font-bold text-[11px] border border-green-600 transition-colors shadow-2xs cursor-pointer"
               title={language === 'hi' ? 'Switch to English' : 'हिंदी में बदलें'}
             >
               <Globe className="w-3 h-3" />
               <span>{language === 'hi' ? 'English' : 'हिन्दी'}</span>
             </button>
+
+            {/* AI Engine Settings Trigger (Gemini Flash) */}
+            {onOpenAiSettings && (
+              <>
+                <span className="text-slate-700 hidden sm:inline" aria-hidden="true">
+                  |
+                </span>
+                <button
+                  type="button"
+                  onClick={onOpenAiSettings}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#7A1B1B] hover:bg-[#912020] text-amber-300 font-bold text-[10px] border border-amber-400/40 transition-colors shadow-2xs cursor-pointer"
+                  title="Configure Google Gemini 1.5 Flash API Key / एआई सेटिंग्स"
+                >
+                  <Sparkles className="w-3 h-3 text-amber-300" />
+                  <span>Gemini Flash</span>
+                </button>
+              </>
+            )}
 
             <span className="text-slate-700 hidden lg:inline" aria-hidden="true">
               |
@@ -264,6 +288,29 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
                 SIH Problem Statement ID: 26043
               </div>
             </div>
+
+            {/* Official Verified Identity & Role Stamp (Bug 1 & 4) */}
+            <button
+              type="button"
+              onClick={openVerificationModal}
+              className="border-2 border-[#0F2537] bg-slate-50 hover:bg-amber-50/60 px-2.5 py-1.5 rounded-none shadow-2xs flex items-center gap-2 cursor-pointer transition-colors text-left group"
+              title="Click to Verify Identity or Switch Persona / अपनी पहचान सत्यापित करें"
+            >
+              <div className="w-7 h-7 bg-[#0F2537] text-white flex items-center justify-center font-bold text-xs shrink-0 group-hover:bg-[#7A1B1B] transition-colors">
+                <UserCheck className="w-4 h-4 text-emerald-400" />
+              </div>
+              <div className="leading-tight">
+                <div className="text-[9px] font-black uppercase tracking-wider text-slate-700 flex items-center gap-1">
+                  <span className="font-mono text-[#7A1B1B] font-bold">{session.maskedIdentifier}</span>
+                  <span className="bg-emerald-100 text-emerald-800 text-[8px] px-1 font-bold">
+                    {session.isVerified ? 'VERIFIED ✓' : 'UNVERIFIED'}
+                  </span>
+                </div>
+                <div className="text-[11px] font-extrabold text-slate-900 truncate max-w-[130px]">
+                  {session.role.replace('_', ' ')}
+                </div>
+              </div>
+            </button>
 
             {/* Official Stamp Box for OfflineQueueBadge */}
             <div

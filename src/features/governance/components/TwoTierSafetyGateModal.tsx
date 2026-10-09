@@ -2,14 +2,15 @@
  * Project Udbhav (SIH PS ID: 26043 — DHTE Jharkhand)
  * Sprint 3: Governance & Capital — Shoe 5: Government & Safety Engine
  * 
- * TwoTierSafetyGateModal:
- * Manages the two-phase regulatory safety validation workflow:
- * - Tier 1: Academic Lab Bench Clearance (Internal Gate — Faculty Supervisor / HOD)
- * - Tier 2: Statutory BIS Testing Certification (External Gate — CSIR-CIMFR, JSPCB, State Labs)
- * - Step 3: Public Pilot Authorization Certificate & Native SVG QR Clearance (District Collector 90-Day Permit)
+ * TwoTierSafetyGateModal (Sprint 4 Task 4.5 Overhaul):
+ * Manages the hardened two-phase regulatory safety validation workflow:
+ * - Tier 1: Academic Lab Bench Clearance (Strictly locked to verified FACULTY_MENTOR)
+ * - Tier 2: Statutory BIS Testing Certification (Locked until Tier 1 passed; restricted to verified ACCREDITED_EVALUATOR or GOVT_ADMIN)
+ * - Step 3: Dual-Clearance District Collector 90-Day Field Pilot Permit with Native SVG QR Code
+ * - Real-Time Broadcast via CentralSyncService ('RECORD_UPDATED', 'SAFETY_GATE_CLEARED')
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ShieldCheck,
   X,
@@ -21,22 +22,24 @@ import {
   FileCheck2,
   Printer,
   Award,
-  AlertCircle,
-  MapPin,
+  AlertTriangle,
   FlaskConical,
+  UserCheck,
 } from 'lucide-react';
 import {
   SafetyValidation,
   Tier2EvaluatorAgency,
 } from '../../../types/governance';
 import { signTier1Safety, certifyTier2Safety, getSafetyValidationById } from '../../../lib/db';
+import { useSession } from '../../../context/SessionContext';
+import { centralSyncService } from '../../../services/centralSyncService';
 
 export interface TwoTierSafetyGateModalProps {
   isOpen: boolean;
   onClose: () => void;
   safetyValidation: SafetyValidation;
   onValidationUpdated: () => void;
-  userRole: 'FACULTY_MENTOR' | 'GOVT_ADMIN' | 'ACCREDITED_EVALUATOR';
+  userRole?: 'FACULTY_MENTOR' | 'GOVT_ADMIN' | 'ACCREDITED_EVALUATOR';
   language?: 'en' | 'hi';
 }
 
@@ -89,7 +92,7 @@ const NativeSvgQRCode: React.FC<{ payload: string; size?: number }> = ({ payload
         grid[startR + r][startC + c] = isBorder || isCenter;
       }
     }
-    // Mark reserved including 1-cell quiet border around finders
+    // Mark quiet border around finders
     for (let r = Math.max(0, startR - 1); r <= Math.min(gridSize - 1, startR + 7); r++) {
       for (let c = Math.max(0, startC - 1); c <= Math.min(gridSize - 1, startC + 7); c++) {
         reserved[r][c] = true;
@@ -176,24 +179,38 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
   onClose,
   safetyValidation: initialValidation,
   onValidationUpdated,
-  userRole: initialRole,
   language = 'en',
 }) => {
+  // Session & RBAC Verification
+  const { session, openVerificationModal, isVerified, switchRole } = useSession();
   const [currentVal, setCurrentVal] = useState<SafetyValidation>(initialValidation);
-  const [simulatedRole, setSimulatedRole] = useState<'FACULTY_MENTOR' | 'GOVT_ADMIN' | 'ACCREDITED_EVALUATOR'>(
-    initialRole
-  );
+
+  // RBAC Role checks
+  const isFacultyMentor = session.role === 'FACULTY_MENTOR' && (session.isVerified ?? isVerified);
+  const isEvaluatorOrGovt =
+    (session.role === 'ACCREDITED_EVALUATOR' || session.role === 'GOVT_ADMIN') &&
+    (session.isVerified ?? isVerified);
 
   // Tier 1 form states
   const [tier1HOD, setTier1HOD] = useState<string>(
-    initialValidation.tier1HODName || 'Dr. R. K. Singh (Department of Environmental Engg., BIT Sindri)'
+    initialValidation.tier1HODName ||
+      (session.role === 'FACULTY_MENTOR'
+        ? session.fullName
+        : 'Dr. Arvind Kumar (Associate Professor, NIT Jamshedpur)')
   );
   const [tier1Url, setTier1Url] = useState<string>(
     initialValidation.tier1TelemetryReportUrl ||
-      'https://udbhav.jharkhand.gov.in/certs/bit-sindri-tier1-safety.pdf'
+      'https://udbhav.jharkhand.gov.in/certs/nitj-tier1-safety-dossier.pdf'
   );
   const [isSigningTier1, setIsSigningTier1] = useState(false);
   const [tier1Message, setTier1Message] = useState<string | null>(null);
+
+  // Auto-sync HOD name when switching to Faculty Mentor
+  useEffect(() => {
+    if (session.role === 'FACULTY_MENTOR' && !initialValidation.tier1HODName) {
+      setTier1HOD(session.fullName);
+    }
+  }, [session.role, session.fullName, initialValidation.tier1HODName]);
 
   // Tier 2 form states
   const [evaluatorAgency, setEvaluatorAgency] = useState<Tier2EvaluatorAgency>(
@@ -213,14 +230,53 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
 
   // Handle Faculty Sign-off on Tier 1
   const handleSignTier1 = async () => {
+    if (!isFacultyMentor) {
+      setTier1Message('PANEL RESTRICTED: Requires verified Faculty Mentor credentials.');
+      return;
+    }
+    if (!tier1HOD.trim()) {
+      setTier1Message('Please specify the Faculty Supervisor / HOD Name.');
+      return;
+    }
+    if (!tier1Url.trim()) {
+      setTier1Message('Please provide the Lab Bench Telemetry Dossier URL.');
+      return;
+    }
+
     try {
       setIsSigningTier1(true);
       setTier1Message(null);
       await signTier1Safety(currentVal.id, tier1HOD.trim(), tier1Url.trim());
+
       const refreshed = await getSafetyValidationById(currentVal.id);
       if (refreshed) {
         setCurrentVal(refreshed);
       }
+
+      // Publish Central Sync broadcast
+      centralSyncService.publish('RECORD_UPDATED', {
+        type: 'safety_validation',
+        id: currentVal.id,
+        masterIssueId: currentVal.masterIssueId,
+        tier1FacultyPassed: true,
+        hodName: tier1HOD.trim(),
+      });
+
+      // Dispatch native toast
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('udbhav:toast', {
+            detail: {
+              text:
+                language === 'hi'
+                  ? 'टियर 1 अकादमिक प्रयोगशाला अनापत्ति सफलतापूर्वक हस्ताक्षरित!'
+                  : 'Tier 1 Academic Lab clearance validated and recorded on state ledger!',
+              type: 'success',
+            },
+          })
+        );
+      }
+
       setTier1Message('Tier 1 Academic Lab clearance signed and recorded successfully!');
       onValidationUpdated();
     } catch (err: unknown) {
@@ -233,15 +289,61 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
 
   // Handle Evaluator / Govt certification of Tier 2
   const handleCertifyTier2 = async () => {
+    if (!isEvaluatorOrGovt) {
+      setTier2Message(
+        'PANEL RESTRICTED: Requires Accredited Evaluator (CSIR-CIMFR) or Govt Admin credentials.'
+      );
+      return;
+    }
+    if (!currentVal.tier1FacultyPassed) {
+      setTier2Message('Barrier Enforced: Tier 1 Lab clearance must be completed first.');
+      return;
+    }
+    if (!bisCode.trim()) {
+      setTier2Message('Please provide applicable BIS standard code.');
+      return;
+    }
+
     try {
       setIsCertifyingTier2(true);
       setTier2Message(null);
       await certifyTier2Safety(currentVal.id, evaluatorAgency, bisCode.trim(), certUrl.trim());
+
       const refreshed = await getSafetyValidationById(currentVal.id);
       if (refreshed) {
         setCurrentVal(refreshed);
       }
-      setTier2Message('Tier 2 Statutory BIS clearance issued! Public Pilot Permit generated.');
+
+      // Publish Central Sync broadcasts
+      centralSyncService.publish('SAFETY_GATE_CLEARED', {
+        id: currentVal.id,
+        masterIssueId: currentVal.masterIssueId,
+        permitId: refreshed?.dcPilotPermitQR || 'JH-DC-PILOT-PERMIT-2026-AUT',
+        timestamp: Date.now(),
+      });
+      centralSyncService.publish('RECORD_UPDATED', {
+        type: 'safety_validation',
+        id: currentVal.id,
+        tier2BisPassed: true,
+        isPublicPilotCleared: true,
+      });
+
+      // Dispatch native toast
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('udbhav:toast', {
+            detail: {
+              text:
+                language === 'hi'
+                  ? 'टियर 2 बीआईएस वैधानिक प्रमाणन जारी! उपायुक्त 90-दिवसीय फील्ड परमिट सृजित।'
+                  : 'Tier 2 BIS Statutory Clearance Certified! DC Field Pilot Permit issued.',
+              type: 'success',
+            },
+          })
+        );
+      }
+
+      setTier2Message('Tier 2 Statutory BIS clearance issued! Public Pilot Permit unlocked.');
       onValidationUpdated();
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to certify Tier 2 safety';
@@ -327,46 +429,23 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
               </span>
             </div>
 
-            {/* In-Modal Role Simulator Switcher for seamless testing */}
+            {/* Verified RBAC Persona Strip */}
             <div className="flex items-center gap-1.5 bg-black/40 px-2.5 py-1 border border-white/20">
+              <UserCheck className="w-3.5 h-3.5 text-amber-300 shrink-0" />
               <span className="text-[10px] text-amber-300 uppercase font-black tracking-wider">
-                Active Simulator:
+                Active Session:
               </span>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => setSimulatedRole('FACULTY_MENTOR')}
-                  className={`px-2 py-0.5 text-[10px] font-black uppercase transition-colors cursor-pointer ${
-                    simulatedRole === 'FACULTY_MENTOR'
-                      ? 'bg-[#F8E7A2] text-[#0B2545]'
-                      : 'text-slate-300 hover:text-white'
-                  }`}
-                >
-                  Faculty Mentor
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSimulatedRole('ACCREDITED_EVALUATOR')}
-                  className={`px-2 py-0.5 text-[10px] font-black uppercase transition-colors cursor-pointer ${
-                    simulatedRole === 'ACCREDITED_EVALUATOR'
-                      ? 'bg-[#F8E7A2] text-[#0B2545]'
-                      : 'text-slate-300 hover:text-white'
-                  }`}
-                >
-                  Accredited Evaluator
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSimulatedRole('GOVT_ADMIN')}
-                  className={`px-2 py-0.5 text-[10px] font-black uppercase transition-colors cursor-pointer ${
-                    simulatedRole === 'GOVT_ADMIN'
-                      ? 'bg-[#F8E7A2] text-[#0B2545]'
-                      : 'text-slate-300 hover:text-white'
-                  }`}
-                >
-                  Govt Admin
-                </button>
-              </div>
+              <span className="text-[11px] font-bold text-white">
+                {session.role} ({session.maskedIdentifier})
+              </span>
+              <button
+                type="button"
+                onClick={openVerificationModal}
+                className="ml-2 px-1.5 py-0.5 bg-amber-400 hover:bg-amber-300 text-slate-950 text-[10px] font-black uppercase rounded-none cursor-pointer"
+                title="Switch role or verify credentials"
+              >
+                Switch Role
+              </button>
             </div>
           </div>
         </div>
@@ -517,17 +596,30 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
               </div>
             </div>
 
-            {/* Action Area for Faculty Mentor */}
+            {/* Action Area for Faculty Mentor with RBAC Enforcement */}
             {!isTier1Passed && (
               <div className="bg-amber-50/70 border border-amber-300 p-3 space-y-3">
-                <div className="flex items-start gap-2 text-xs text-amber-900">
-                  <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                  <p>
-                    <strong>Faculty Sign-off Required:</strong> Before external statutory testing can begin, the supervising Faculty Mentor must confirm that prototype hardware meets collegiate lab safety benchmarks.
-                  </p>
-                </div>
-
-                {simulatedRole === 'FACULTY_MENTOR' ? (
+                {!isFacultyMentor ? (
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-2 bg-amber-100 border border-amber-400 text-amber-950 text-xs">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-800 shrink-0 mt-0.5" />
+                      <div>
+                        <strong className="block">PANEL RESTRICTED: Requires Faculty Mentor Credentials</strong>
+                        <span>
+                          Lab bench telemetry validation requires verified Faculty Mentor session. Currently active as{' '}
+                          <strong>{session.role}</strong> ({session.maskedIdentifier}).
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => switchRole('FACULTY_MENTOR')}
+                      className="px-3 py-1.5 bg-[#7A1B1B] hover:bg-[#5E1414] text-white text-xs font-bold uppercase shrink-0 cursor-pointer"
+                    >
+                      Switch to Faculty Mentor
+                    </button>
+                  </div>
+                ) : (
                   <div className="space-y-3 pt-1">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
                       <div>
@@ -539,7 +631,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
                           value={tier1HOD}
                           onChange={(e) => setTier1HOD(e.target.value)}
                           className="w-full p-2 border border-slate-300 bg-white font-medium text-xs focus:outline-none focus:border-[#0B2545]"
-                          placeholder="e.g. Dr. R. K. Singh (BIT Sindri)"
+                          placeholder="e.g. Dr. Arvind Kumar (NIT Jamshedpur)"
                         />
                       </div>
 
@@ -566,17 +658,13 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
                     <button
                       type="button"
                       onClick={handleSignTier1}
-                      disabled={isSigningTier1 || !tier1HOD.trim()}
+                      disabled={isSigningTier1 || !tier1HOD.trim() || !tier1Url.trim()}
                       className="px-4 py-2 bg-[#1E6F50] hover:bg-[#16563e] disabled:bg-slate-400 text-white text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
                     >
                       <CheckCircle2 className="w-4 h-4 text-[#F8E7A2]" />
                       <span>{isSigningTier1 ? 'Validating...' : 'Sign & Validate Lab Telemetry'}</span>
                     </button>
                   </div>
-                ) : (
-                  <p className="text-xs text-slate-600 italic">
-                    You are simulating <strong>{simulatedRole}</strong>. Switch to <strong>Faculty Mentor</strong> in the top switcher to execute this sign-off.
-                  </p>
                 )}
               </div>
             )}
@@ -596,9 +684,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
               <div className="flex items-center gap-2">
                 <span
                   className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-black ${
-                    !isTier1Passed
-                      ? 'bg-slate-400 text-white'
-                      : 'bg-[#0B2545] text-white'
+                    !isTier1Passed ? 'bg-slate-400 text-white' : 'bg-[#0B2545] text-white'
                   }`}
                 >
                   2
@@ -650,8 +736,8 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
                   <span className="font-bold text-emerald-950 flex items-center gap-1 mt-0.5">
                     <FlaskConical className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
                     <span>
-                      {EVALUATOR_AGENCIES.find((a) => a.id === currentVal.tier2EvaluatorAgency)
-                        ?.label || currentVal.tier2EvaluatorAgency}
+                      {EVALUATOR_AGENCIES.find((a) => a.id === currentVal.tier2EvaluatorAgency)?.label ||
+                        currentVal.tier2EvaluatorAgency}
                     </span>
                   </span>
                 </div>
@@ -701,93 +787,110 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
             ) : (
               /* Pending Certification Form for ACCREDITED_EVALUATOR or GOVT_ADMIN */
               <div className="space-y-3 bg-slate-50 p-3 border border-slate-300">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                  {/* Agency Selector */}
-                  <div className="md:col-span-2">
-                    <label className="block text-[10px] uppercase font-bold text-slate-700 mb-1">
-                      Accredited Testing &amp; Regulatory Agency:
-                    </label>
-                    <select
-                      value={evaluatorAgency}
-                      onChange={(e) => setEvaluatorAgency(e.target.value as Tier2EvaluatorAgency)}
-                      className="w-full p-2 border border-slate-300 bg-white font-medium text-xs focus:outline-none focus:border-[#0B2545]"
-                    >
-                      {EVALUATOR_AGENCIES.map((agency) => (
-                        <option key={agency.id} value={agency.id}>
-                          {agency.label} — {agency.location}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Standard Code Input */}
-                  <div>
-                    <label className="block text-[10px] uppercase font-bold text-slate-700 mb-1">
-                      Applicable BIS Standard Code:
-                    </label>
-                    <input
-                      type="text"
-                      value={bisCode}
-                      onChange={(e) => setBisCode(e.target.value)}
-                      className="w-full p-2 border border-slate-300 bg-white font-mono text-xs focus:outline-none focus:border-[#0B2545]"
-                      placeholder="e.g. IS 10500:2012 Drinking Water Specification"
-                    />
-                    <div className="flex flex-wrap gap-1 mt-1.5">
-                      {STANDARD_PRESETS.map((preset) => (
-                        <button
-                          key={preset}
-                          type="button"
-                          onClick={() => setBisCode(preset)}
-                          className="px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 text-[9px] font-bold text-slate-700 cursor-pointer"
-                        >
-                          {preset.split(' ')[0]} {preset.split(' ')[1]}
-                        </button>
-                      ))}
+                {!isEvaluatorOrGovt ? (
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-2 bg-amber-100 border border-amber-400 text-amber-950 text-xs">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-800 shrink-0 mt-0.5" />
+                      <div>
+                        <strong className="block">
+                          PANEL RESTRICTED: Requires Accredited Evaluator or Govt Admin
+                        </strong>
+                        <span>
+                          Issuing statutory BIS compliance requires CSIR-CIMFR/NABL Evaluator or State Govt Admin.
+                          Currently active as <strong>{session.role}</strong>.
+                        </span>
+                      </div>
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => switchRole('ACCREDITED_EVALUATOR')}
+                      className="px-3 py-1.5 bg-[#7A1B1B] hover:bg-[#5E1414] text-white text-xs font-bold uppercase shrink-0 cursor-pointer"
+                    >
+                      Switch to Evaluator
+                    </button>
                   </div>
-
-                  {/* Certificate URL Input */}
-                  <div>
-                    <label className="block text-[10px] uppercase font-bold text-slate-700 mb-1">
-                      Statutory Test Certificate URL:
-                    </label>
-                    <input
-                      type="url"
-                      value={certUrl}
-                      onChange={(e) => setCertUrl(e.target.value)}
-                      className="w-full p-2 border border-slate-300 bg-white font-mono text-xs focus:outline-none focus:border-[#0B2545]"
-                      placeholder="https://udbhav.jharkhand.gov.in/certs/..."
-                    />
-                  </div>
-                </div>
-
-                {tier2Message && (
-                  <div className="text-xs p-2 bg-white border border-blue-300 font-bold text-slate-800">
-                    {tier2Message}
-                  </div>
-                )}
-
-                {/* Role-governed action */}
-                {simulatedRole === 'ACCREDITED_EVALUATOR' || simulatedRole === 'GOVT_ADMIN' ? (
-                  <button
-                    type="button"
-                    onClick={handleCertifyTier2}
-                    disabled={isCertifyingTier2 || !bisCode.trim()}
-                    className="px-4 py-2 bg-[#7A1B1B] hover:bg-[#962626] disabled:bg-slate-400 text-white text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
-                  >
-                    <FileCheck2 className="w-4 h-4 text-[#F8E7A2]" />
-                    <span>
-                      {isCertifyingTier2
-                        ? 'Issuing Statutory Clearance...'
-                        : 'Issue Tier 2 BIS Statutory Clearance'}
-                    </span>
-                  </button>
                 ) : (
-                  <div className="p-2.5 bg-amber-50 border border-amber-300 text-xs text-amber-900">
-                    <strong>Evaluator Authority Required:</strong> You are simulating{' '}
-                    <strong>{simulatedRole}</strong>. Only an <strong>Accredited Evaluator</strong> or{' '}
-                    <strong>Govt Admin</strong> can certify BIS compliance. Switch role in top bar.
-                  </div>
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                      {/* Agency Selector */}
+                      <div className="md:col-span-2">
+                        <label className="block text-[10px] uppercase font-bold text-slate-700 mb-1">
+                          Accredited Testing &amp; Regulatory Agency:
+                        </label>
+                        <select
+                          value={evaluatorAgency}
+                          onChange={(e) => setEvaluatorAgency(e.target.value as Tier2EvaluatorAgency)}
+                          className="w-full p-2 border border-slate-300 bg-white font-medium text-xs focus:outline-none focus:border-[#0B2545]"
+                        >
+                          {EVALUATOR_AGENCIES.map((agency) => (
+                            <option key={agency.id} value={agency.id}>
+                              {agency.label} — {agency.location}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Standard Code Input */}
+                      <div>
+                        <label className="block text-[10px] uppercase font-bold text-slate-700 mb-1">
+                          Applicable BIS Standard Code:
+                        </label>
+                        <input
+                          type="text"
+                          value={bisCode}
+                          onChange={(e) => setBisCode(e.target.value)}
+                          className="w-full p-2 border border-slate-300 bg-white font-mono text-xs focus:outline-none focus:border-[#0B2545]"
+                          placeholder="e.g. IS 10500:2012 Drinking Water Specification"
+                        />
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {STANDARD_PRESETS.map((preset) => (
+                            <button
+                              key={preset}
+                              type="button"
+                              onClick={() => setBisCode(preset)}
+                              className="px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 text-[9px] font-bold text-slate-700 cursor-pointer"
+                            >
+                              {preset.split(' ')[0]} {preset.split(' ')[1]}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Certificate URL Input */}
+                      <div>
+                        <label className="block text-[10px] uppercase font-bold text-slate-700 mb-1">
+                          Statutory Test Certificate URL:
+                        </label>
+                        <input
+                          type="url"
+                          value={certUrl}
+                          onChange={(e) => setCertUrl(e.target.value)}
+                          className="w-full p-2 border border-slate-300 bg-white font-mono text-xs focus:outline-none focus:border-[#0B2545]"
+                          placeholder="https://udbhav.jharkhand.gov.in/certs/..."
+                        />
+                      </div>
+                    </div>
+
+                    {tier2Message && (
+                      <div className="text-xs p-2 bg-white border border-blue-300 font-bold text-slate-800">
+                        {tier2Message}
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={handleCertifyTier2}
+                      disabled={isCertifyingTier2 || !bisCode.trim()}
+                      className="px-4 py-2 bg-[#7A1B1B] hover:bg-[#962626] disabled:bg-slate-400 text-white text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+                    >
+                      <FileCheck2 className="w-4 h-4 text-[#F8E7A2]" />
+                      <span>
+                        {isCertifyingTier2
+                          ? 'Issuing Statutory Clearance...'
+                          : 'Issue Tier 2 BIS Statutory Clearance'}
+                      </span>
+                    </button>
+                  </>
                 )}
               </div>
             )}
@@ -798,18 +901,14 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
           {/* ------------------------------------------------------------------ */}
           <div
             className={`border-2 p-4 space-y-4 ${
-              !isPilotCleared
-                ? 'bg-slate-50 border-slate-300'
-                : 'bg-emerald-50/30 border-[#1E6F50]'
+              !isPilotCleared ? 'bg-slate-50 border-slate-300' : 'bg-emerald-50/30 border-[#1E6F50]'
             }`}
           >
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-2">
               <div className="flex items-center gap-2">
                 <span
                   className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-black ${
-                    !isPilotCleared
-                      ? 'bg-slate-400 text-white'
-                      : 'bg-[#1E6F50] text-white'
+                    !isPilotCleared ? 'bg-slate-400 text-white' : 'bg-[#1E6F50] text-white'
                   }`}
                 >
                   3
@@ -872,7 +971,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
 
                   {/* Body Content */}
                   <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
-                    {/* QR Code Container */}
+                    {/* Native QR Code Container */}
                     <div className="flex flex-col items-center justify-center p-3 bg-slate-50 border border-slate-200 text-center space-y-2">
                       <NativeSvgQRCode payload={qrPayload} size={150} />
                       <div className="space-y-0.5">
@@ -919,7 +1018,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
                           <span className="text-[10px] uppercase font-bold text-slate-500 block">
                             Statutory BIS Standard:
                           </span>
-                          <span className="font-mono font-bold text-slate-800">
+                          <span className="font-mono text-slate-700">
                             {currentVal.tier2BisStandardCode}
                           </span>
                         </div>
@@ -928,49 +1027,48 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
                           <span className="text-[10px] uppercase font-bold text-slate-500 block">
                             Testing Laboratory:
                           </span>
+                          <span className="font-medium text-slate-700">
+                            {EVALUATOR_AGENCIES.find((a) => a.id === currentVal.tier2EvaluatorAgency)?.label ||
+                              currentVal.tier2EvaluatorAgency}
+                          </span>
+                        </div>
+
+                        <div>
+                          <span className="text-[10px] uppercase font-bold text-slate-500 block">
+                            Validity Period:
+                          </span>
+                          <span className="font-bold text-emerald-800">
+                            90 Calendar Days from Clearance
+                          </span>
+                        </div>
+
+                        <div>
+                          <span className="text-[10px] uppercase font-bold text-slate-500 block">
+                            Issuing Authority:
+                          </span>
                           <span className="font-bold text-slate-800">
-                            {EVALUATOR_AGENCIES.find((a) => a.id === currentVal.tier2EvaluatorAgency)
-                              ?.id || currentVal.tier2EvaluatorAgency}
+                            District Collectorate, Ranchi / Dumka
                           </span>
                         </div>
                       </div>
 
-                      {/* Territorial Jurisdiction */}
-                      <div className="p-2.5 bg-slate-50 border border-slate-200 space-y-1">
-                        <div className="flex items-center gap-1.5 text-slate-800 font-bold">
-                          <MapPin className="w-3.5 h-3.5 text-[#7A1B1B]" />
-                          <span>Authorized Territorial Jurisdiction:</span>
-                        </div>
-                        <p className="text-[11px] text-slate-600 leading-relaxed">
-                          Authorized strictly within Gram Panchayat boundaries of Shikaripara Block, Dumka District. Prototype may be deployed for continuous field telemetry and water quality intervention for a statutory window of 90 days from permit issue date.
-                        </p>
-                      </div>
-
-                      {/* Signatories & Endorsements */}
-                      <div className="pt-2 flex items-center justify-between text-[10px] text-slate-500 border-t border-slate-200">
-                        <div>
-                          <span className="font-bold text-slate-700 block">Signed &amp; Sealed:</span>
-                          <span>District Collectorate, Dumka</span>
-                        </div>
-                        <div className="text-right">
-                          <span className="font-bold text-slate-700 block">Digital Verification:</span>
-                          <span className="font-mono">Govt of Jharkhand DHTE SafeGate</span>
-                        </div>
+                      <div className="pt-2 border-t border-slate-200 text-[10px] text-slate-500 leading-snug">
+                        This digital permit certifies that the hardware prototype has cleared institutional lab calibration and independent statutory testing under the specified standard code. Authorized for public deployment under the Project Udbhav framework.
                       </div>
                     </div>
                   </div>
-                </div>
 
-                {/* Print Button for field officers */}
-                <div className="flex justify-end">
-                  <button
-                    type="button"
-                    onClick={handlePrint}
-                    className="px-4 py-2 bg-[#0B2545] hover:bg-[#153e70] text-white text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
-                  >
-                    <Printer className="w-3.5 h-3.5 text-[#F8E7A2]" />
-                    <span>Print Official Field Pilot Permit</span>
-                  </button>
+                  {/* Print Action Strip */}
+                  <div className="mt-4 pt-3 border-t border-slate-200 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handlePrint}
+                      className="px-3 py-1.5 bg-[#0B2545] hover:bg-[#1E3A5F] text-white text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5 text-[#F8E7A2]" />
+                      <span>Print DC Pilot Authorization Pass</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -980,24 +1078,32 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
         {/* ==================================================================== */}
         {/* 4. MODAL FOOTER */}
         {/* ==================================================================== */}
-        <div className="bg-slate-100 p-3 sm:p-4 border-t border-slate-300 flex items-center justify-between gap-3 shrink-0">
-          <div className="text-xs text-slate-600">
-            Current Status:{' '}
-            <strong className={isPilotCleared ? 'text-emerald-800' : 'text-slate-800'}>
+        <div className="bg-slate-100 p-3 border-t border-slate-300 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
+          <div className="flex items-center gap-2">
+            <span className="text-slate-500">Current Validation State:</span>
+            <span
+              className={`font-black uppercase text-[11px] ${
+                isPilotCleared
+                  ? 'text-emerald-700'
+                  : isTier1Passed
+                  ? 'text-blue-700'
+                  : 'text-amber-700'
+              }`}
+            >
               {isPilotCleared
-                ? 'Public Pilot Clearance Active (90-Day Permit Granted)'
+                ? 'Dual-Tier Cleared (Permit Issued)'
                 : isTier1Passed
-                ? 'Awaiting Tier 2 BIS Regulatory Clearance'
-                : 'Awaiting Tier 1 Academic Lab Bench Verification'}
-            </strong>
+                ? 'Tier 1 Passed (Pending BIS)'
+                : 'Pending Tier 1 Lab Review'}
+            </span>
           </div>
 
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-2 bg-slate-300 hover:bg-slate-400 text-slate-800 text-xs font-bold uppercase transition-colors cursor-pointer"
+            className="px-4 py-1.5 bg-slate-300 hover:bg-slate-400 text-slate-800 font-bold uppercase rounded-none transition-colors cursor-pointer"
           >
-            Close Gate Console
+            {language === 'hi' ? 'बंद करें' : 'Close'}
           </button>
         </div>
       </div>

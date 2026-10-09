@@ -154,6 +154,8 @@ export async function createOfflineDraftSubmission(params: {
     id: crypto.randomUUID(),
     timestamp: Date.now(),
     syncStatus: 'DRAFT',
+    status: 'REPORTED',
+    masterLifecycleStatus: 'REPORTED',
     maskedCitizenId,
     phoneHash,
     isWhistleblower: params.isWhistleblower ?? false,

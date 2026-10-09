@@ -3,10 +3,11 @@
  * Gram Panchayat Endorsement & Mandatory Inspection Review Modal
  * 
  * Strict Anti-Rubber-Stamp & Audit Guardrails:
- * 1. Severity Classification (LOW, MEDIUM, HIGH, CRITICAL)
- * 2. Estimated Affected Households (>= 1)
- * 3. Mandatory Field Inspection Note with strict minimum of 20 characters
- * 4. Stamped with Inspector ID and timestamp upon endorsement
+ * 1. Role-Based Access Control (RBAC): Enforces verified PANCHAYAT_OFFICER credentials
+ * 2. Severity Classification (LOW, MEDIUM, HIGH, CRITICAL)
+ * 3. Estimated Affected Households (>= 1)
+ * 4. Mandatory Field Inspection Note with strict minimum of 20 characters (live counter indicator)
+ * 5. Cross-Device Synchronization via CentralSyncService & IndexedDB state transition (REPORTED -> ENDORSED_MASTER)
  */
 
 import React, { useState, useEffect } from 'react';
@@ -14,6 +15,9 @@ import {
   OfflineDraftSubmission,
   SeverityLevel,
 } from '../../../types/ingestion';
+import { useSession } from '../../../context/SessionContext';
+import { centralSyncService } from '../../../services/centralSyncService';
+import { endorseSubmission, rejectSubmission } from '../../../lib/db';
 import {
   ShieldCheck,
   X,
@@ -27,6 +31,7 @@ import {
   Clock,
   Building,
   UserCheck,
+  Lock,
 } from 'lucide-react';
 
 export interface PanchayatEndorsementModalProps {
@@ -36,8 +41,8 @@ export interface PanchayatEndorsementModalProps {
   language?: 'hi' | 'en';
   /** Modal close handler */
   onClose: () => void;
-  /** Endorsement callback emitting validated metadata */
-  onEndorse: (
+  /** Optional endorsement callback emitting validated metadata */
+  onEndorse?: (
     draftId: string,
     data: {
       severity: SeverityLevel;
@@ -46,7 +51,7 @@ export interface PanchayatEndorsementModalProps {
       inspectorId: string;
     }
   ) => Promise<void>;
-  /** Rejection callback */
+  /** Optional rejection callback */
   onReject?: (draftId: string, reason: string) => Promise<void>;
 }
 
@@ -59,6 +64,10 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
   onEndorse,
   onReject,
 }) => {
+  // Session & RBAC Verification
+  const { session, openVerificationModal, isVerified } = useSession();
+  const isAuthorizedOfficer = session.role === 'PANCHAYAT_OFFICER' && (session.isVerified ?? isVerified);
+
   // Form input states
   const [severity, setSeverity] = useState<SeverityLevel>(submission.severity || 'MEDIUM');
   const [affectedHouseholds, setAffectedHouseholds] = useState<number>(
@@ -68,12 +77,21 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
     submission.panchayatInspectionNotes || ''
   );
   const [inspectorId, setInspectorId] = useState<string>(
-    submission.panchayatInspectorId || 'JH-BDO-RNC-04'
+    session.role === 'PANCHAYAT_OFFICER'
+      ? session.maskedIdentifier
+      : submission.panchayatInspectorId || 'JH-BDO-RNC-04'
   );
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [showRejectPrompt, setShowRejectPrompt] = useState<boolean>(false);
   const [rejectReason, setRejectReason] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Sync inspectorId when session role switches to Panchayat Officer
+  useEffect(() => {
+    if (session.role === 'PANCHAYAT_OFFICER') {
+      setInspectorId(session.maskedIdentifier);
+    }
+  }, [session.role, session.maskedIdentifier]);
 
   // Local object URL for photo evidence with auto cleanup
   const [photoPreview, setPhotoPreview] = useState<string | null>(
@@ -94,20 +112,38 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
     }
   }, [submission.photoBlob, submission.photoPreviewUrl]);
 
+  // Anti-Rubber-Stamp Validation Checks
   const noteLength = inspectionNote.trim().length;
   const isNoteValid = noteLength >= MIN_NOTE_CHARACTERS;
   const isHouseholdsValid = affectedHouseholds >= 1;
-  const canEndorse = isNoteValid && isHouseholdsValid && !isSubmitting;
+  const isSeverityValid = Boolean(severity);
+
+  // Button disabled rule: must be authorized officer + valid note (>= 20 chars) + households >= 1 + severity selected
+  const canEndorse =
+    isAuthorizedOfficer &&
+    isNoteValid &&
+    isHouseholdsValid &&
+    isSeverityValid &&
+    !isSubmitting;
 
   const handleEndorseSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
-    if (!isNoteValid) {
+    if (!isAuthorizedOfficer) {
       setErrorMessage(
         language === 'hi'
-          ? `अमान्य टिप्पणी: स्थलीय निरीक्षण नोट में कम से कम ${MIN_NOTE_CHARACTERS} अक्षर होने अनिवार्य हैं (वर्तमान: ${noteLength})।`
-          : `Anti-Rubber-Stamp Violation: Inspection note must be at least ${MIN_NOTE_CHARACTERS} characters (Current: ${noteLength}).`
+          ? 'पैनल प्रतिबंधित: स्थलीय सत्यापन केवल अधिकृत पंचायत सचिव या बीडीओ द्वारा ही किया जा सकता है।'
+          : 'PANEL RESTRICTED: Requires Panchayat Secretary or BDO credentials.'
+      );
+      return;
+    }
+
+    if (!isSeverityValid) {
+      setErrorMessage(
+        language === 'hi'
+          ? 'कृपया गंभीरता वर्गीकरण (Severity Level) का चयन करें।'
+          : 'Please select a statutory severity classification.'
       );
       return;
     }
@@ -121,14 +157,85 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
       return;
     }
 
+    if (!isNoteValid) {
+      setErrorMessage(
+        language === 'hi'
+          ? `एंटी-रबर-स्टैम्प नियम: स्थलीय निरीक्षण नोट में कम से कम ${MIN_NOTE_CHARACTERS} अक्षर होने अनिवार्य हैं (वर्तमान: ${noteLength})।`
+          : `Anti-Rubber-Stamp Violation: Inspection note must be at least ${MIN_NOTE_CHARACTERS} characters (Current: ${noteLength}).`
+      );
+      return;
+    }
+
     try {
       setIsSubmitting(true);
-      await onEndorse(submission.id, {
+      const activeInspectorId =
+        session.role === 'PANCHAYAT_OFFICER'
+          ? session.maskedIdentifier
+          : inspectorId.trim() || 'Panchayat #JH-BDO-12';
+
+      // 1. Transition record to ENDORSED_MASTER in IndexedDB
+      await endorseSubmission(
+        submission.id,
         severity,
         affectedHouseholds,
-        inspectionNote: inspectionNote.trim(),
-        inspectorId: inspectorId.trim() || 'JH-BDO-RNC-04',
+        inspectionNote.trim(),
+        activeInspectorId
+      );
+
+      // 2. Invoke callback if supplied by parent
+      if (onEndorse) {
+        await onEndorse(submission.id, {
+          severity,
+          affectedHouseholds,
+          inspectionNote: inspectionNote.trim(),
+          inspectorId: activeInspectorId,
+        });
+      }
+
+      // 3. Publish cross-tab lifecycle broadcast events
+      centralSyncService.publish('RECORD_UPDATED', {
+        id: submission.id,
+        type: 'draft',
+        status: 'ENDORSED_MASTER',
+        masterLifecycleStatus: 'ENDORSED_MASTER',
       });
+      centralSyncService.publish('ENDORSEMENT_COMPLETED', {
+        draftId: submission.id,
+        data: {
+          severity,
+          affectedHouseholds,
+          inspectionNote: inspectionNote.trim(),
+          inspectorId: activeInspectorId,
+          timestamp: Date.now(),
+        },
+      });
+
+      // 4. Trigger native toast & browser notification
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('udbhav:toast', {
+            detail: {
+              text:
+                language === 'hi'
+                  ? `पंचायत सत्यापन सफल! समस्या आधिकारिक रूप से प्रेषित (${submission.maskedCitizenId} → ENDORSED_MASTER)`
+                  : `Panchayat Official Endorsement Confirmed! Record ${submission.maskedCitizenId} promoted to ENDORSED_MASTER.`,
+              type: 'success',
+            },
+          })
+        );
+
+        if ('Notification' in window && Notification.permission === 'granted') {
+          try {
+            new Notification('DHTE Jharkhand — Endorsement Stamped', {
+              body: `Issue ${submission.maskedCitizenId} officially endorsed by ${activeInspectorId}.`,
+              icon: '/favicon.ico',
+            });
+          } catch {
+            // Notification error ignored
+          }
+        }
+      }
+
       onClose();
     } catch (err) {
       console.error('[Panchayat Modal] Endorsement error:', err);
@@ -139,13 +246,41 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
   };
 
   const handleRejectSubmit = async () => {
-    if (!onReject) return;
     try {
       setIsSubmitting(true);
-      await onReject(
-        submission.id,
-        rejectReason.trim() || 'Non-actionable / out of territorial scope'
-      );
+      const activeInspectorId =
+        session.role === 'PANCHAYAT_OFFICER'
+          ? session.maskedIdentifier
+          : inspectorId.trim() || 'Panchayat #JH-BDO-12';
+      const cleanReason = rejectReason.trim() || 'Non-actionable / out of territorial scope';
+
+      if (onReject) {
+        await onReject(submission.id, cleanReason);
+      } else {
+        await rejectSubmission(submission.id, cleanReason, activeInspectorId);
+      }
+
+      centralSyncService.publish('RECORD_UPDATED', {
+        id: submission.id,
+        type: 'draft',
+        status: 'REJECTED_SPAM',
+        masterLifecycleStatus: 'REJECTED_SPAM',
+      });
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('udbhav:toast', {
+            detail: {
+              text:
+                language === 'hi'
+                  ? `प्रविष्टि अस्वीकृत / स्पैम के रूप में दर्ज की गई (${submission.maskedCitizenId})`
+                  : `Submission ${submission.maskedCitizenId} flagged as Rejected / Spam.`,
+              type: 'info',
+            },
+          })
+        );
+      }
+
       onClose();
     } catch (err) {
       console.error('[Panchayat Modal] Rejection error:', err);
@@ -171,7 +306,7 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
             <div>
               <span className="uppercase text-xs sm:text-sm">
                 {language === 'hi'
-                  ? 'पंचायत सत्यापन एवं स्थलीय निरीक्षण'
+                  ? 'पंचायत सत्यापन एवं स्थलीय निरीक्षण द्वार'
                   : 'Gram Panchayat Endorsement & Inspection Gate'}
               </span>
               <span className="hidden sm:inline-block ml-2 text-[10px] bg-white/10 px-1.5 py-0.2 text-amber-200 font-mono">
@@ -190,7 +325,52 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
         </div>
 
         {/* ============================================================== */}
-        {/* 2. SUBMITTED CITIZEN EVIDENCE PLATE */}
+        {/* 2. RBAC WARNING BANNER OR VERIFIED OFFICER STRIP */}
+        {/* ============================================================== */}
+        {!isAuthorizedOfficer ? (
+          <div className="bg-amber-50 border-b-2 border-amber-500 p-3 sm:p-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                <div>
+                  <div className="text-xs font-black text-amber-950 uppercase tracking-wide flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-amber-800" />
+                    <span>PANEL RESTRICTED: Requires Panchayat Secretary or BDO credentials</span>
+                  </div>
+                  <p className="text-[11px] text-amber-900 mt-0.5 leading-snug">
+                    {language === 'hi'
+                      ? `सत्यापन केवल अधिकृत पंचायत सचिव या प्रखण्ड विकास पदाधिकारी (BDO) द्वारा ही किया जा सकता है। वर्तमान में आप ${session.role} (${session.fullName}) के रूप में सक्रिय हैं।`
+                      : `Statutory endorsement requires verified Panchayat Secretary or BDO credentials. Currently logged in as ${session.role} (${session.fullName} - ${session.maskedIdentifier}).`}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={openVerificationModal}
+                className="px-3.5 py-2 bg-[#7A1B1B] hover:bg-[#5E1414] active:bg-black text-white text-xs font-bold uppercase tracking-wider rounded-none shrink-0 inline-flex items-center justify-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+              >
+                <ShieldCheck className="w-4 h-4 text-amber-300" />
+                <span>{language === 'hi' ? 'पहचान सत्यापित करें' : 'Verify Officer Profile'}</span>
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="bg-emerald-50 border-b border-emerald-300 px-4 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 text-emerald-950 font-bold">
+              <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
+              <span>
+                {language === 'hi' ? 'अधिकृत पंचायत अधिकारी:' : 'Verified Officer:'}{' '}
+                <strong className="text-emerald-900">{session.fullName}</strong> ({session.maskedIdentifier})
+              </span>
+            </div>
+            <span className="text-[10px] bg-emerald-700 text-white font-mono px-2 py-0.5 uppercase tracking-wider font-bold">
+              RBAC AUTHENTICATED &bull; LGD VALIDATED
+            </span>
+          </div>
+        )}
+
+        {/* ============================================================== */}
+        {/* 3. SUBMITTED CITIZEN EVIDENCE PLATE */}
         {/* ============================================================== */}
         <div className="bg-slate-50 border-b border-slate-300 p-3.5 space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -243,7 +423,7 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
             <div className="flex items-center gap-1 text-slate-700 font-medium">
               <Building className="w-3.5 h-3.5 text-[#0B2545] shrink-0" />
               <span>
-                Domain: <strong className="text-slate-900">{submission.aiTriageCategory}</strong>
+                Domain: <strong className="text-slate-900">{submission.aiTriageCategory || 'General Civic Infrastructure'}</strong>
               </span>
             </div>
           </div>
@@ -287,7 +467,7 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
         </div>
 
         {/* ============================================================== */}
-        {/* 3. STRUCTURED PANCHAYAT ENDORSEMENT FORM */}
+        {/* 4. STRUCTURED PANCHAYAT ENDORSEMENT FORM */}
         {/* ============================================================== */}
         <form onSubmit={handleEndorseSubmit} className="p-4 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
@@ -333,7 +513,7 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
             </div>
           </div>
 
-          {/* Inspector Identification Token */}
+          {/* Field Inspector Identification Token */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
             <div>
               <label className="block text-xs font-bold text-slate-800 mb-1">
@@ -350,15 +530,18 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
                   value={inspectorId}
                   onChange={(e) => setInspectorId(e.target.value)}
                   placeholder="JH-BDO-RNC-04"
-                  className="flex-1 text-xs p-2 border border-slate-400 bg-white rounded-none focus:outline-none font-mono font-bold"
+                  readOnly={isAuthorizedOfficer}
+                  className={`flex-1 text-xs p-2 border border-slate-400 rounded-none focus:outline-none font-mono font-bold ${
+                    isAuthorizedOfficer ? 'bg-slate-100 text-slate-800' : 'bg-white'
+                  }`}
                 />
               </div>
             </div>
 
-            <div className="flex items-center text-[11px] text-slate-500 bg-slate-50 border border-slate-200 p-2">
+            <div className="flex items-center text-[11px] text-slate-600 bg-slate-50 border border-slate-200 p-2">
               <span className="leading-snug">
                 {language === 'hi'
-                  ? 'सत्यापन के उपरांत यह चुनौती राज्य के तकनीकी विश्वविद्यालयों हेतु आधिकारिक रूप से प्रेषित होगी।'
+                  ? 'सत्यापन के उपरांत यह चुनौती राज्य के तकनीकी विश्वविद्यालयों हेतु आधिकारिक रूप से प्रेषित होगी (ENDORSED_MASTER)।'
                   : 'Once endorsed, this civic challenge is published to technical universities across Jharkhand for engineering solutions.'}
               </span>
             </div>
@@ -377,13 +560,13 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
               {/* Live Character Counter Indicator */}
               <div className="flex items-center gap-1.5 text-xs font-mono font-bold">
                 <span
-                  className={`px-1.5 py-0.2 border ${
+                  className={`px-2 py-0.5 border ${
                     isNoteValid
                       ? 'bg-emerald-100 text-emerald-900 border-emerald-400'
                       : 'bg-red-100 text-red-900 border-red-400 animate-pulse'
                   }`}
                 >
-                  {noteLength} / {MIN_NOTE_CHARACTERS} min chars
+                  {noteLength} / {MIN_NOTE_CHARACTERS} min chars required
                 </span>
               </div>
             </div>
@@ -460,12 +643,12 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
           )}
 
           {/* ============================================================== */}
-          {/* 4. ACTION BUTTONS */}
+          {/* 5. ACTION BUTTONS & AUDIT COMMIT */}
           {/* ============================================================== */}
           <div className="pt-2 border-t border-slate-300 flex flex-col sm:flex-row items-center justify-between gap-2.5">
             <div className="flex items-center gap-2 w-full sm:w-auto">
               {/* Reject / Spam Trigger */}
-              {!showRejectPrompt && onReject && (
+              {!showRejectPrompt && (
                 <button
                   type="button"
                   onClick={() => setShowRejectPrompt(true)}
@@ -483,12 +666,12 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
                 type="button"
                 onClick={onClose}
                 disabled={isSubmitting}
-                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-bold uppercase rounded-none transition-colors w-full sm:w-auto"
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-bold uppercase rounded-none transition-colors w-full sm:w-auto cursor-pointer"
               >
                 {language === 'hi' ? 'बंद करें' : 'Close'}
               </button>
 
-              {/* Endorse & Escalate Button */}
+              {/* Confirm Official Endorsement Button */}
               <button
                 type="submit"
                 disabled={!canEndorse}
@@ -498,9 +681,15 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
                     : 'bg-slate-300 text-slate-500 cursor-not-allowed border border-slate-300'
                 }`}
                 title={
-                  !isNoteValid
-                    ? `Requires at least ${MIN_NOTE_CHARACTERS} characters in the inspection note`
-                    : 'Endorse and Escalate to Universities'
+                  !isAuthorizedOfficer
+                    ? 'Panel Restricted: Requires Panchayat Secretary or BDO credentials'
+                    : !isNoteValid
+                    ? `Anti-Rubber-Stamp Violation: Requires at least ${MIN_NOTE_CHARACTERS} characters in the inspection note (Current: ${noteLength})`
+                    : !isHouseholdsValid
+                    ? 'Affected households must be at least 1'
+                    : !isSeverityValid
+                    ? 'Please select a statutory severity level'
+                    : 'Confirm Official Endorsement'
                 }
               >
                 <CheckCircle2 className="w-4 h-4" />
@@ -510,8 +699,8 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
                       ? 'सत्यापन जारी...'
                       : 'Endorsing...'
                     : language === 'hi'
-                    ? 'सत्यापित कर विश्वविद्यालय को प्रेषित करें'
-                    : 'Endorse & Escalate to Universities'}
+                    ? 'आधिकारिक सत्यापन की पुष्टि करें'
+                    : 'Confirm Official Endorsement'}
                 </span>
               </button>
             </div>

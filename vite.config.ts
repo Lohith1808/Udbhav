@@ -12,6 +12,15 @@ export default defineConfig({
   },
   build: {
     target: 'esnext',
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-core': ['react', 'react-dom'],
+          'vendor-db': ['dexie', 'dexie-react-hooks'],
+        },
+      },
+    },
   },
   server: {
     port: 3000,

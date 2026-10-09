@@ -59,11 +59,24 @@ import { LGDGeoTagger } from './features/ingestion/components/LGDGeoTagger';
 import { AudioVoiceRecorder } from './features/ingestion/components/AudioVoiceRecorder';
 import { initAutoSyncListener } from './utils/syncWorker';
 import { calculateIntensityScore } from './utils/intensityScorer';
+import { SessionProvider, useSession } from './context/SessionContext';
+import { generateLLMProblemBoundaryBrief } from './services/aiService';
+const ProfileVerificationModal = React.lazy(
+  () => import('./components/common/ProfileVerificationModal').then((m) => ({ default: m.ProfileVerificationModal }))
+);
+const CivicFirstAidTriageCard = React.lazy(
+  () => import('./features/ingestion/components/CivicFirstAidTriageCard').then((m) => ({ default: m.CivicFirstAidTriageCard }))
+);
+const ApiKeyConfigModal = React.lazy(
+  () => import('./components/common/ApiKeyConfigModal').then((m) => ({ default: m.ApiKeyConfigModal }))
+);
+import { centralSyncService } from './services/centralSyncService';
 import {
   OfflineDraftSubmission,
   LGDLocation,
   RawCoordinates,
   SeverityLevel,
+  IssueStatus,
 } from './types/ingestion';
 import {
   Building2,
@@ -143,15 +156,49 @@ const BlobThumbnail: React.FC<{ blob?: Blob; previewUrl?: string }> = ({ blob, p
   );
 };
 
-export const App: React.FC = () => {
+const AppContent: React.FC = () => {
+  const {
+    session,
+    isVerificationModalOpen,
+    closeVerificationModal,
+  } = useSession();
+
   // Localization & Accessibility state
   const [language, setLanguage] = useState<'hi' | 'en'>('en');
   const [fontSize, setFontSize] = useState<'sm' | 'md' | 'lg'>('md');
   const [highContrast, setHighContrast] = useState<boolean>(false);
   const [activeNavTab, setActiveNavTab] = useState<string>('report');
+  const [isAiConfigOpen, setIsAiConfigOpen] = useState<boolean>(false);
   const [simulatedRole, setSimulatedRole] = useState<
     'FACULTY_MENTOR' | 'GOVT_ADMIN' | 'INDUSTRY_CSR' | 'ACCREDITED_EVALUATOR'
   >('INDUSTRY_CSR');
+
+  // Synchronize persona role with active nav tab
+  useEffect(() => {
+    if (session.role === 'PANCHAYAT_OFFICER' && activeNavTab !== 'panchayat') {
+      setActiveNavTab('panchayat');
+    } else if (session.role === 'STUDENT_SOLVER' && activeNavTab !== 'academic') {
+      setActiveNavTab('academic');
+    } else if (session.role === 'FACULTY_MENTOR' && activeNavTab !== 'faculty') {
+      setActiveNavTab('faculty');
+    } else if (session.role === 'INDUSTRY_CSR' && activeNavTab !== 'csr') {
+      setActiveNavTab('csr');
+    } else if ((session.role === 'GOVT_ADMIN' || session.role === 'ACCREDITED_EVALUATOR') && activeNavTab !== 'gis') {
+      setActiveNavTab('gis');
+    }
+  }, [session.role]);
+
+  // Synchronize simulatedRole for legacy components
+  useEffect(() => {
+    if (
+      session.role === 'FACULTY_MENTOR' ||
+      session.role === 'GOVT_ADMIN' ||
+      session.role === 'INDUSTRY_CSR' ||
+      session.role === 'ACCREDITED_EVALUATOR'
+    ) {
+      setSimulatedRole(session.role);
+    }
+  }, [session.role]);
 
   // Terminal form state for civic ledger
   const [rawPhoneInput, setRawPhoneInput] = useState<string>('9876543210');
@@ -222,17 +269,114 @@ export const App: React.FC = () => {
   const allBriefs = useLiveQuery(() => db.engineeringBriefs.toArray(), [], []);
   const allTeams = useLiveQuery(() => db.studentTeams.toArray(), [], []);
 
-  // Computed audit counters for Panchayat Desk
-  const pendingEndorsementsCount = (allSubmissions || []).filter(
-    (s) =>
-      !s.masterLifecycleStatus ||
-      (s.masterLifecycleStatus !== 'ENDORSED_MASTER' &&
-        s.masterLifecycleStatus !== 'REJECTED_SPAM')
-  ).length;
+  // Helper predicates for clean Panchayat Queue ticket categorization (Bug 4 Resolution)
+  const isTicketPending = (s: OfflineDraftSubmission): boolean => {
+    const st = s.status || s.masterLifecycleStatus || 'REPORTED';
+    return (
+      st === 'REPORTED' ||
+      st === 'AI_TRIAGED' ||
+      (!s.masterLifecycleStatus && st !== 'ENDORSED_MASTER' && st !== 'REJECTED_SPAM')
+    );
+  };
 
-  const endorsedSubmissionsCount = (allSubmissions || []).filter(
-    (s) => s.masterLifecycleStatus === 'ENDORSED_MASTER'
-  ).length;
+  const isTicketEndorsed = (s: OfflineDraftSubmission): boolean => {
+    const st = s.status || s.masterLifecycleStatus;
+    return st === 'ENDORSED_MASTER';
+  };
+
+  const isTicketRejected = (s: OfflineDraftSubmission): boolean => {
+    const st = s.status || s.masterLifecycleStatus;
+    return st === 'REJECTED_SPAM';
+  };
+
+  // Computed audit counters for Panchayat Desk
+  const pendingEndorsementsCount = (allSubmissions || []).filter(isTicketPending).length;
+  const endorsedSubmissionsCount = (allSubmissions || []).filter(isTicketEndorsed).length;
+  const rejectedSubmissionsCount = (allSubmissions || []).filter(isTicketRejected).length;
+
+  // Multi-Device Cross-Tab Real-Time Sync Bus Listener (Task 4.4 & Bug 4 Resolution)
+  useEffect(() => {
+    const unsubscribe = centralSyncService.subscribe(async (msg) => {
+      if (msg.type === 'RECORD_CREATED') {
+        const payload = msg.payload as { type?: string; id?: string; draft?: OfflineDraftSubmission };
+        if (payload?.type === 'draft' && payload?.draft) {
+          const existing = await db.draftSubmissions.get(payload.draft.id);
+          if (!existing) {
+            await db.draftSubmissions.put(payload.draft);
+          }
+        }
+        setStatusNotification({
+          text:
+            language === 'hi'
+              ? 'नया नागरिक शिकायत पत्र प्राप्त हुआ — पंचायत सत्यापन कतार अद्यतित!'
+              : 'New citizen intake report received — Panchayat verification queue updated immediately!',
+          type: 'info',
+        });
+        setTimeout(() => setStatusNotification(null), 4500);
+      } else if (msg.type === 'ENDORSEMENT_COMPLETED') {
+        const payload = msg.payload as {
+          draftId?: string;
+          data?: {
+            severity: SeverityLevel;
+            affectedHouseholds: number;
+            inspectionNote: string;
+            inspectorId: string;
+            timestamp?: number;
+          };
+        };
+        if (payload?.draftId && payload?.data) {
+          const existing = await db.draftSubmissions.get(payload.draftId);
+          if (existing && existing.masterLifecycleStatus !== 'ENDORSED_MASTER') {
+            await db.draftSubmissions.update(payload.draftId, {
+              status: 'ENDORSED_MASTER',
+              masterLifecycleStatus: 'ENDORSED_MASTER',
+              severity: payload.data.severity,
+              affectedHouseholdCount: payload.data.affectedHouseholds,
+              panchayatInspectionNotes: payload.data.inspectionNote,
+              panchayatInspectorId: payload.data.inspectorId,
+              panchayatEndorsedAt: payload.data.timestamp || Date.now(),
+            });
+          }
+        }
+        setStatusNotification({
+          text:
+            language === 'hi'
+              ? 'पंचायत सत्यापन सफल! समस्या आधिकारिक रूप से प्रेषित (ENDORSED_MASTER)।'
+              : 'Panchayat endorsement synchronized across terminals (ENDORSED_MASTER)!',
+          type: 'success',
+        });
+        setTimeout(() => setStatusNotification(null), 4500);
+      } else if (msg.type === 'RECORD_UPDATED') {
+        const payload = msg.payload as { id?: string; status?: IssueStatus; masterLifecycleStatus?: IssueStatus };
+        if (payload?.id) {
+          const targetStatus = payload.status || payload.masterLifecycleStatus;
+          if (targetStatus) {
+            const existing = await db.draftSubmissions.get(payload.id);
+            if (existing && existing.masterLifecycleStatus !== targetStatus) {
+              await db.draftSubmissions.update(payload.id, {
+                status: targetStatus,
+                masterLifecycleStatus: targetStatus,
+              });
+            }
+          }
+        }
+      }
+    });
+
+    const handleToastEvent = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && detail.text) {
+        setStatusNotification({ text: detail.text, type: detail.type || 'info' });
+        setTimeout(() => setStatusNotification(null), 4500);
+      }
+    };
+    window.addEventListener('udbhav:toast', handleToastEvent);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener('udbhav:toast', handleToastEvent);
+    };
+  }, [language]);
 
   // Register background network restoration auto-sync worker (Task 1.4)
   useEffect(() => {
@@ -345,6 +489,11 @@ export const App: React.FC = () => {
       }
 
       await saveDraft(newDraft);
+      centralSyncService.publish('RECORD_CREATED', {
+        type: 'draft',
+        id: newDraft.id,
+        draft: newDraft,
+      });
 
       // Reset photo & audio states
       setCapturedPhotoBlob(null);
@@ -385,13 +534,24 @@ export const App: React.FC = () => {
       inspectorId: string;
     }
   ) => {
+    const activeInspector = session.role === 'PANCHAYAT_OFFICER' ? session.maskedIdentifier : data.inspectorId;
     await endorseSubmission(
       draftId,
       data.severity,
       data.affectedHouseholds,
       data.inspectionNote,
-      data.inspectorId
+      activeInspector
     );
+    centralSyncService.publish('RECORD_UPDATED', {
+      id: draftId,
+      status: 'ENDORSED_MASTER',
+      masterLifecycleStatus: 'ENDORSED_MASTER',
+      type: 'draft',
+    });
+    centralSyncService.publish('ENDORSEMENT_COMPLETED', {
+      draftId,
+      data: { ...data, inspectorId: activeInspector, timestamp: Date.now() },
+    });
     setStatusNotification({
       text:
         language === 'hi'
@@ -403,7 +563,9 @@ export const App: React.FC = () => {
   };
 
   const handleRejectSubmission = async (draftId: string, reason: string) => {
-    await rejectSubmission(draftId, reason, 'JH-BDO-RNC-04');
+    const inspectorId = session.role === 'PANCHAYAT_OFFICER' ? session.maskedIdentifier : 'JH-BDO-RNC-04';
+    await rejectSubmission(draftId, reason, inspectorId);
+    centralSyncService.publish('RECORD_UPDATED', { type: 'rejected', draftId });
     setStatusNotification({
       text:
         language === 'hi'
@@ -414,26 +576,46 @@ export const App: React.FC = () => {
     setTimeout(() => setStatusNotification(null), 4000);
   };
 
-  // AI Problem Boundary Brief Handlers (Task 2.2)
-  const handleGenerateBrief = (submission: OfflineDraftSubmission) => {
-    const brief = generateProblemBoundaryBrief({
-      id: submission.remoteMasterIssueId || submission.id,
-      transcriptionText: submission.transcriptionDraft || '',
-      category: submission.aiTriageCategory,
-      district: submission.lgdLocation?.districtName || 'Jharkhand',
-      block: submission.lgdLocation?.blockName || 'Administrative Block',
-      affectedHouseholds: submission.affectedHouseholdCount || 50,
-      panchayatNote:
-        submission.panchayatInspectionNotes || 'On-site statutory audit completed by Panchayat Officer.',
-      severity: submission.severity || 'HIGH',
-    });
-    setActiveGeneratedBrief(brief);
+  // AI Problem Boundary Brief Handlers (Task 2.2 & 4.3 Real LLM)
+  const handleGenerateBrief = async (submission: OfflineDraftSubmission) => {
+    setIsSavingBrief(true);
+    try {
+      const brief = await generateLLMProblemBoundaryBrief({
+        id: submission.remoteMasterIssueId || submission.id,
+        transcriptionText: submission.transcriptionDraft || '',
+        category: submission.aiTriageCategory,
+        district: submission.lgdLocation?.districtName || 'Jharkhand',
+        block: submission.lgdLocation?.blockName || 'Administrative Block',
+        affectedHouseholds: submission.affectedHouseholdCount || 50,
+        panchayatNote:
+          submission.panchayatInspectionNotes || 'On-site statutory audit completed by Panchayat Officer.',
+        severity: submission.severity || 'HIGH',
+      });
+      setActiveGeneratedBrief(brief);
+    } catch (err) {
+      console.error('Failed to generate LLM boundary brief, using deterministic fallback:', err);
+      const fallbackBrief = generateProblemBoundaryBrief({
+        id: submission.remoteMasterIssueId || submission.id,
+        transcriptionText: submission.transcriptionDraft || '',
+        category: submission.aiTriageCategory,
+        district: submission.lgdLocation?.districtName || 'Jharkhand',
+        block: submission.lgdLocation?.blockName || 'Administrative Block',
+        affectedHouseholds: submission.affectedHouseholdCount || 50,
+        panchayatNote:
+          submission.panchayatInspectionNotes || 'On-site statutory audit completed by Panchayat Officer.',
+        severity: submission.severity || 'HIGH',
+      });
+      setActiveGeneratedBrief(fallbackBrief);
+    } finally {
+      setIsSavingBrief(false);
+    }
   };
 
   const handleSaveGeneratedBrief = async (brief: EngineeringProblemBrief) => {
     setIsSavingBrief(true);
     try {
       await saveEngineeringBrief(brief);
+      centralSyncService.publish('RECORD_CREATED', { type: 'brief', id: brief.id });
       setStatusNotification({
         text:
           language === 'hi'
@@ -498,22 +680,12 @@ export const App: React.FC = () => {
     return sub.syncStatus === activeLedgerTab;
   });
 
-  // Filtered list for Panchayat Verification Desk (Task 1.5)
+  // Filtered list for Panchayat Verification Desk (Bug 4 Resolution & Task 4.4)
   const panchayatDeskList = (allSubmissions || []).filter((sub: OfflineDraftSubmission) => {
     if (deskFilter === 'ALL') return true;
-    if (deskFilter === 'PENDING') {
-      return (
-        !sub.masterLifecycleStatus ||
-        (sub.masterLifecycleStatus !== 'ENDORSED_MASTER' &&
-          sub.masterLifecycleStatus !== 'REJECTED_SPAM')
-      );
-    }
-    if (deskFilter === 'ENDORSED') {
-      return sub.masterLifecycleStatus === 'ENDORSED_MASTER';
-    }
-    if (deskFilter === 'REJECTED') {
-      return sub.masterLifecycleStatus === 'REJECTED_SPAM';
-    }
+    if (deskFilter === 'PENDING') return isTicketPending(sub);
+    if (deskFilter === 'ENDORSED') return isTicketEndorsed(sub);
+    if (deskFilter === 'REJECTED') return isTicketRejected(sub);
     return true;
   });
 
@@ -539,6 +711,7 @@ export const App: React.FC = () => {
         onHighContrastToggle={() => setHighContrast(!highContrast)}
         activeNavTab={activeNavTab}
         onNavTabChange={setActiveNavTab}
+        onOpenAiSettings={() => setIsAiConfigOpen(true)}
         isSyncing={isSimulatingSync}
         onSyncTrigger={handleBatchSync}
       />
@@ -831,7 +1004,7 @@ export const App: React.FC = () => {
                       : tab === 'ENDORSED'
                       ? `${language === 'hi' ? 'सत्यापित' : 'Endorsed'} (${endorsedSubmissionsCount})`
                       : tab === 'REJECTED'
-                      ? `${language === 'hi' ? 'अस्वीकृत' : 'Rejected'}`
+                      ? `${language === 'hi' ? 'अस्वीकृत' : 'Rejected'} (${rejectedSubmissionsCount})`
                       : `${language === 'hi' ? 'सभी' : 'All'}`}
                   </button>
                 ))}
@@ -858,8 +1031,9 @@ export const App: React.FC = () => {
             ) : (
               <div className="divide-y divide-slate-200">
                 {panchayatDeskList.map((entry: OfflineDraftSubmission, idx: number) => {
-                  const isEndorsed = entry.masterLifecycleStatus === 'ENDORSED_MASTER';
-                  const isRejected = entry.masterLifecycleStatus === 'REJECTED_SPAM';
+                  const entryStatus = entry.status || entry.masterLifecycleStatus || 'REPORTED';
+                  const isEndorsed = entryStatus === 'ENDORSED_MASTER';
+                  const isRejected = entryStatus === 'REJECTED_SPAM';
                   const isPending = !isEndorsed && !isRejected;
 
                   return (
@@ -895,6 +1069,11 @@ export const App: React.FC = () => {
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider bg-red-100 text-red-900 border border-red-400">
                                   <Ban className="w-3 h-3 text-red-700" />
                                   <span>REJECTED / SPAM</span>
+                                </span>
+                              ) : entryStatus === 'AI_TRIAGED' ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider bg-blue-100 text-blue-900 border border-blue-400">
+                                  <AlertTriangle className="w-3 h-3 text-blue-700" />
+                                  <span>AI TRIAGED &bull; PENDING PANCHAYAT</span>
                                 </span>
                               ) : (
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider bg-amber-100 text-amber-900 border border-amber-400 animate-pulse">
@@ -1539,6 +1718,18 @@ export const App: React.FC = () => {
                 </div>
               </fieldset>
 
+              {/* AI First-Aid Triage & Local Technician Dispatch Card (Sprint 4 — Task 4.3) */}
+              <React.Suspense fallback={null}>
+                <CivicFirstAidTriageCard
+                  transcript={vernacularText}
+                  category={issueCategory}
+                  village={resolvedLgdLocation?.panchayatName || 'Ranchi'}
+                  language={language}
+                  onEscalateToRD={() => handleSaveToTerminal('QUEUED')}
+                  onOpenAiSettings={() => setIsAiConfigOpen(true)}
+                />
+              </React.Suspense>
+
               {/* Action Buttons */}
               <div className="pt-2 border-t border-slate-300 flex flex-col sm:flex-row gap-2">
                 <button
@@ -1965,7 +2156,37 @@ export const App: React.FC = () => {
 
       {/* Official Formal NIC Civic Footer */}
       <GovtFooter language={language} />
+
+      {/* Verified Profile & Central Sync Gateway Modal (Bug 1 & 4) */}
+      {isVerificationModalOpen && (
+        <React.Suspense fallback={null}>
+          <ProfileVerificationModal
+            isOpen={isVerificationModalOpen}
+            onClose={closeVerificationModal}
+            language={language}
+          />
+        </React.Suspense>
+      )}
+
+      {/* Google Gemini 1.5 Flash AI Settings Modal (Bug 3 Resolution) */}
+      {isAiConfigOpen && (
+        <React.Suspense fallback={null}>
+          <ApiKeyConfigModal
+            isOpen={isAiConfigOpen}
+            onClose={() => setIsAiConfigOpen(false)}
+            language={language}
+          />
+        </React.Suspense>
+      )}
     </div>
+  );
+};
+
+export const App: React.FC = () => {
+  return (
+    <SessionProvider>
+      <AppContent />
+    </SessionProvider>
   );
 };
 

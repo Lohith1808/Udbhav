@@ -24,13 +24,17 @@ export type EscrowStatus = 'LOCKED' | 'APPROVED' | 'DISBURSED' | 'DISPUTED';
  */
 export interface MilestoneTranche {
   stage: TrancheStage;
-  percentage: 30 | 40;
+  percentage: number;
   amountINR: number;
   status: EscrowStatus;
   deliverableDescription: string;
   deliverableProofUrl?: string;
   facultySignoffAt?: number;
+  facultySignoffBy?: string;
+  panchayatSignoffAt?: number;
+  panchayatSignoffBy?: string;
   govtSignoffAt?: number;
+  govtSignoffBy?: string;
   disbursedAt?: number;
   rejectionReason?: string;
 }

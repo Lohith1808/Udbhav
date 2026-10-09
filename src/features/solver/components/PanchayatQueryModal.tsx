@@ -25,6 +25,7 @@ import {
   StudentTeam,
 } from '../../../types/solver';
 import { db, saveTechnicalQuery } from '../../../lib/db';
+import { askGroundZeroClarification } from '../../../services/aiService';
 
 export interface PanchayatQueryModalProps {
   brief: EngineeringProblemBrief;
@@ -44,6 +45,8 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
   const [newQueryText, setNewQueryText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [aiAssistantAnswer, setAiAssistantAnswer] = useState<string | null>(null);
+  const [isAiAnswering, setIsAiAnswering] = useState<boolean>(false);
 
   const teamId = team?.id || `TEAM-${brief.id.slice(-6)}`;
   const teamName = team?.teamName || 'Collegiate Solver Team';
@@ -118,6 +121,19 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
       setStatusMessage('Failed to submit query. Please try again.');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleAskAiAssistant = async () => {
+    if (!newQueryText.trim() || isAiAnswering) return;
+    setIsAiAnswering(true);
+    setAiAssistantAnswer(null);
+    try {
+      const context = `${brief.title}. Context: ${brief.contextSummary}. Panchayat Field Notes: ${brief.fieldEvidenceSummary.panchayatNote}. District: ${brief.fieldEvidenceSummary.district}, Block: ${brief.fieldEvidenceSummary.block}. Measurable Targets: ${brief.measurableBenchmarks.map(m => `${m.metric}: ${m.targetValue}`).join('; ')}. Statutory Cost: ₹${brief.maxCostINR}.`;
+      const ans = await askGroundZeroClarification(newQueryText.trim(), context);
+      setAiAssistantAnswer(ans);
+    } finally {
+      setIsAiAnswering(false);
     }
   };
 
@@ -250,6 +266,28 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
               </span>
             </div>
 
+            {/* Grounded AI Assistant Response Box */}
+            {aiAssistantAnswer && (
+              <div className="mb-2 p-3 bg-purple-50 border border-purple-300 text-xs text-purple-950 space-y-1">
+                <div className="font-bold flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-purple-900">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                    <span>Grounded Field Assistant (Gemini Flash RAG):</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setAiAssistantAnswer(null)}
+                    className="text-purple-600 hover:text-purple-900 text-[10px] uppercase font-bold cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+                <p className="text-[11px] leading-relaxed bg-white p-2 border border-purple-200">
+                  {aiAssistantAnswer}
+                </p>
+              </div>
+            )}
+
             <form onSubmit={handleSubmitQuery} className="space-y-2">
               <textarea
                 required
@@ -265,22 +303,35 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
                   Keep queries focused on physical, electrical, and environmental constraints.
                 </span>
 
-                <button
-                  type="submit"
-                  disabled={!newQueryText.trim() || isSubmitting}
-                  className="px-4 py-2 bg-[#0B2545] hover:bg-[#1E3A5F] disabled:bg-slate-400 text-white text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs disabled:cursor-not-allowed"
-                >
-                  <Send className="w-3.5 h-3.5 text-amber-300" />
-                  <span>
-                    {isSubmitting
-                      ? language === 'hi'
-                        ? 'प्रेषित हो रहा है...'
-                        : 'Dispatching...'
-                      : language === 'hi'
-                      ? 'प्रश्न प्रेषित करें'
-                      : 'Dispatch Field Query'}
-                  </span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleAskAiAssistant}
+                    disabled={!newQueryText.trim() || isAiAnswering}
+                    className="px-3 py-2 bg-[#7A1B1B] hover:bg-[#912020] disabled:bg-slate-300 text-white text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs disabled:cursor-not-allowed"
+                    title="Ask grounded AI if this parameter is in the field report"
+                  >
+                    <Sparkles className={`w-3.5 h-3.5 text-amber-300 ${isAiAnswering ? 'animate-spin' : ''}`} />
+                    <span>{isAiAnswering ? 'Ground-Checking...' : 'AI Ground-Check'}</span>
+                  </button>
+
+                  <button
+                    type="submit"
+                    disabled={!newQueryText.trim() || isSubmitting}
+                    className="px-4 py-2 bg-[#0B2545] hover:bg-[#1E3A5F] disabled:bg-slate-400 text-white text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs disabled:cursor-not-allowed"
+                  >
+                    <Send className="w-3.5 h-3.5 text-amber-300" />
+                    <span>
+                      {isSubmitting
+                        ? language === 'hi'
+                          ? 'प्रेषित हो रहा है...'
+                          : 'Dispatching...'
+                        : language === 'hi'
+                        ? 'प्रश्न प्रेषित करें'
+                        : 'Dispatch Field Query'}
+                    </span>
+                  </button>
+                </div>
               </div>
             </form>
           </div>
