@@ -9,11 +9,12 @@
  * - Chronic Structural Escalation Gate to Academic Solvers (Shoe 2)
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   evaluateCivicFirstAidTriage,
   CivicFirstAidTriageResult,
-  hasGeminiApiKey,
+  checkOllamaActive,
+  getOllamaModel,
 } from '../../../services/aiService';
 import {
   Sparkles,
@@ -54,6 +55,21 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
   const [isEvaluating, setIsEvaluating] = useState<boolean>(false);
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
   const [resolvedLocally, setResolvedLocally] = useState<boolean>(false);
+  const [isOllamaLive, setIsOllamaLive] = useState<boolean>(false);
+  const [ollamaModel, setOllamaModel] = useState<string>('llama3.2');
+
+  useEffect(() => {
+    let isMounted = true;
+    checkOllamaActive().then((active) => {
+      if (isMounted) {
+        setIsOllamaLive(active);
+        setOllamaModel(getOllamaModel());
+      }
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const handleRunTriage = async () => {
     if (!transcript.trim()) return;
@@ -90,7 +106,6 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
     }
   };
 
-  const isGeminiLive = hasGeminiApiKey();
 
   const getTradeIcon = (trade: string | null) => {
     switch (trade) {
@@ -131,13 +146,13 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
           {/* Live vs Offline Engine Indicator */}
           <span
             className={`px-2 py-0.5 text-[9px] font-mono font-bold border flex items-center gap-1 ${
-              isGeminiLive
-                ? 'bg-purple-50 text-purple-900 border-purple-300'
-                : 'bg-emerald-50 text-emerald-900 border-emerald-300'
+              isOllamaLive
+                ? 'bg-emerald-50 text-emerald-900 border-emerald-300'
+                : 'bg-amber-50 text-amber-900 border-amber-300'
             }`}
           >
             <Cpu className="w-3 h-3" />
-            <span>{isGeminiLive ? 'Gemini 1.5 Flash' : 'Offline Heuristic'}</span>
+            <span>{isOllamaLive ? `Ollama (${ollamaModel})` : 'Offline Heuristic'}</span>
           </span>
 
           {onOpenAiSettings && (
@@ -145,7 +160,7 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
               type="button"
               onClick={onOpenAiSettings}
               className="p-1 text-slate-400 hover:text-slate-800 hover:bg-slate-100 transition-colors cursor-pointer"
-              title="Configure Gemini API Key / एआई सेटिंग्स"
+              title="Local Ollama AI Settings / स्थानीय एआई सेटिंग्स"
               aria-label="AI Settings"
             >
               <Settings className="w-3.5 h-3.5" />

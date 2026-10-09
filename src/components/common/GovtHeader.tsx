@@ -20,8 +20,9 @@ import {
   ShieldCheck,
   Building,
   UserCheck,
-  Sparkles,
+  Cpu,
 } from 'lucide-react';
+import { checkOllamaActive, getOllamaModel } from '../../services/aiService';
 
 export interface GovtHeaderProps {
   language: 'hi' | 'en';
@@ -53,6 +54,26 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
   const { session, openVerificationModal } = useSession();
   // Live IST Timestamp formatter
   const [currentIST, setCurrentIST] = useState<string>('');
+  const [isOllamaLive, setIsOllamaLive] = useState<boolean>(false);
+  const [ollamaModel, setOllamaModel] = useState<string>('llama3.2');
+
+  // Monitor local Ollama daemon reachability
+  useEffect(() => {
+    let isMounted = true;
+    const checkStatus = async () => {
+      const active = await checkOllamaActive();
+      if (isMounted) {
+        setIsOllamaLive(active);
+        setOllamaModel(getOllamaModel());
+      }
+    };
+    checkStatus();
+    const interval = setInterval(checkStatus, 12000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
 
   useEffect(() => {
     const updateTime = () => {
@@ -180,7 +201,7 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
               <span>{language === 'hi' ? 'English' : 'हिन्दी'}</span>
             </button>
 
-            {/* AI Engine Settings Trigger (Gemini Flash) */}
+            {/* AI Engine Settings Trigger (Local Ollama AI / ऑफलाइन मॉडल) */}
             {onOpenAiSettings && (
               <>
                 <span className="text-slate-700 hidden sm:inline" aria-hidden="true">
@@ -189,11 +210,25 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
                 <button
                   type="button"
                   onClick={onOpenAiSettings}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#7A1B1B] hover:bg-[#912020] text-amber-300 font-bold text-[10px] border border-amber-400/40 transition-colors shadow-2xs cursor-pointer"
-                  title="Configure Google Gemini 1.5 Flash API Key / एआई सेटिंग्स"
+                  className={`inline-flex items-center gap-1.5 px-2 py-0.5 font-bold text-[10px] border transition-colors shadow-2xs cursor-pointer ${
+                    isOllamaLive
+                      ? 'bg-emerald-900/90 text-emerald-200 border-emerald-500 hover:bg-emerald-800'
+                      : 'bg-amber-900/80 text-amber-200 border-amber-600/60 hover:bg-amber-800'
+                  }`}
+                  title={
+                    isOllamaLive
+                      ? `Local Ollama AI Active (${ollamaModel}) / स्थानीय ओलामा एआई`
+                      : 'Local Ollama Offline — Heuristic Fallback Active / ऑफलाइन मॉडल'
+                  }
                 >
-                  <Sparkles className="w-3 h-3 text-amber-300" />
-                  <span>Gemini Flash</span>
+                  <Cpu className="w-3 h-3 text-amber-300 shrink-0" />
+                  <span>
+                    {isOllamaLive
+                      ? `● Ollama Active (${ollamaModel})`
+                      : language === 'hi'
+                      ? '○ AI Local Fallback (ऑफलाइन मॉडल)'
+                      : '○ AI Local Fallback'}
+                  </span>
                 </button>
               </>
             )}
@@ -302,7 +337,13 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
               <div className="leading-tight">
                 <div className="text-[9px] font-black uppercase tracking-wider text-slate-700 flex items-center gap-1">
                   <span className="font-mono text-[#7A1B1B] font-bold">{session.maskedIdentifier}</span>
-                  <span className="bg-emerald-100 text-emerald-800 text-[8px] px-1 font-bold">
+                  <span
+                    className={`text-[8px] px-1 font-bold ${
+                      session.isVerified
+                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                        : 'bg-amber-100 text-amber-900 border border-amber-300'
+                    }`}
+                  >
                     {session.isVerified ? 'VERIFIED ✓' : 'UNVERIFIED'}
                   </span>
                 </div>

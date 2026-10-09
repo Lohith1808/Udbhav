@@ -1,14 +1,14 @@
 /**
  * Project Udbhav (SIH PS ID: 26043 — DHTE Jharkhand)
- * Real LLM Structured-Output AI Engine (Sprint 4 — Task 4.3)
+ * Local Workstation Ollama AI REST Engine & Zero-Key Inference (Sprint 5 — Task 5.2)
  * 
- * Resolves Bug 3 (Lack of real AI integration) using Google Gemini 1.5 Flash REST API.
- * Uses native fetch (0 external npm dependencies).
- * Features:
- * - Civic First-Aid Triage & Local Livelihood Dispatch
- * - Engineering Problem Boundary Brief Generator (strictly no prescriptive code)
- * - Ground-Zero Clarification RAG Bridge
- * - Resilient offline deterministic fallback when unkeyed or offline.
+ * Resolves Bug 3 (Missing AI & API key demands) using local Ollama REST endpoints:
+ * - Direct local REST query: POST http://127.0.0.1:11434/api/generate
+ * - Tag probe & model discovery: GET http://127.0.0.1:11434/api/tags
+ * - Zero external heavy npm packages (native browser fetch)
+ * - Zero runtime crashes: Automatic fallback to offline deterministic heuristic engine
+ * - Enforces NEP 2020 student autonomy: strictly no prescriptive circuits, code, or architectures
+ * - Strictly enforces statutory BOM cost ceiling <= ₹2,500
  */
 
 import {
@@ -18,8 +18,11 @@ import {
 } from '../types/solver';
 import {
   generateProblemBoundaryBrief,
-  IssueForBoundaryGeneration,
+  type ProblemBriefInput,
+  type IssueForBoundaryGeneration,
 } from '../features/solver/utils/boundaryGenerator';
+
+export type { ProblemBriefInput, IssueForBoundaryGeneration };
 
 export interface CivicFirstAidTriageResult {
   isRoutineMaintenance: boolean;
@@ -36,96 +39,206 @@ export interface CivicFirstAidTriageResult {
   reasoningSummary: string;
 }
 
-const STORAGE_API_KEY = 'udbhav_gemini_api_key';
-const GEMINI_API_URL =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+// Configuration storage keys
+const STORAGE_OLLAMA_ENDPOINT = 'udbhav_ollama_endpoint';
+const STORAGE_OLLAMA_MODEL = 'udbhav_ollama_model';
+const DEFAULT_OLLAMA_ENDPOINT = 'http://127.0.0.1:11434';
+const DEFAULT_OLLAMA_MODEL = 'llama3.2';
 
 /**
- * Retrieves the configured Gemini API key from localStorage or Vite environment variable
+ * Retrieves the configured Ollama REST endpoint from localStorage (default: http://127.0.0.1:11434)
  */
-export function getGeminiApiKey(): string {
+export function getOllamaEndpoint(): string {
   if (typeof window !== 'undefined' && window.localStorage) {
-    const custom = window.localStorage.getItem(STORAGE_API_KEY);
-    if (custom && custom.trim().length > 0) {
-      return custom.trim();
+    const val = window.localStorage.getItem(STORAGE_OLLAMA_ENDPOINT);
+    if (val && val.trim().length > 0) {
+      return val.trim();
     }
   }
-  return (import.meta.env.VITE_GEMINI_API_KEY as string) || '';
+  return DEFAULT_OLLAMA_ENDPOINT;
 }
 
 /**
- * Persists custom Gemini API key entered by evaluator into localStorage
+ * Persists custom Ollama REST endpoint in localStorage
  */
-export function setGeminiApiKey(apiKey: string): void {
+export function setOllamaEndpoint(endpoint: string): void {
   if (typeof window !== 'undefined' && window.localStorage) {
-    if (apiKey.trim()) {
-      window.localStorage.setItem(STORAGE_API_KEY, apiKey.trim());
+    if (endpoint.trim()) {
+      window.localStorage.setItem(STORAGE_OLLAMA_ENDPOINT, endpoint.trim());
     } else {
-      window.localStorage.removeItem(STORAGE_API_KEY);
+      window.localStorage.removeItem(STORAGE_OLLAMA_ENDPOINT);
     }
   }
 }
 
 /**
- * Checks whether an API key is available
+ * Retrieves the configured Ollama model name from localStorage (default: llama3.2)
  */
-export function hasGeminiApiKey(): boolean {
-  return getGeminiApiKey().length > 0;
+export function getOllamaModel(): string {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    const val = window.localStorage.getItem(STORAGE_OLLAMA_MODEL);
+    if (val && val.trim().length > 0) {
+      return val.trim();
+    }
+  }
+  return DEFAULT_OLLAMA_MODEL;
 }
 
 /**
- * Tests connection with Gemini Flash REST endpoint
+ * Persists custom Ollama model name in localStorage
  */
-export async function testGeminiConnection(
-  keyToTest?: string
-): Promise<{ success: boolean; model: string; message: string }> {
-  const key = keyToTest || getGeminiApiKey();
-  if (!key) {
-    return {
-      success: false,
-      model: 'None',
-      message: 'No Gemini API key provided. Please configure a key for live LLM queries.',
-    };
+export function setOllamaModel(model: string): void {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    if (model.trim()) {
+      window.localStorage.setItem(STORAGE_OLLAMA_MODEL, model.trim());
+    } else {
+      window.localStorage.removeItem(STORAGE_OLLAMA_MODEL);
+    }
   }
+}
+
+/**
+ * Fast ping to check if local Ollama daemon is reachable
+ */
+export async function checkOllamaActive(endpointToTest?: string): Promise<boolean> {
+  const base = (endpointToTest || getOllamaEndpoint()).replace(/\/+$/, '');
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch(`${base}/api/tags`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pings http://127.0.0.1:11434/api/tags to list installed local models and diagnose connection status
+ */
+export async function testOllamaConnection(
+  endpointToTest?: string,
+  modelToTest?: string
+): Promise<{ success: boolean; model: string; models: string[]; message: string }> {
+  const base = (endpointToTest || getOllamaEndpoint()).replace(/\/+$/, '');
+  const model = modelToTest || getOllamaModel();
 
   try {
-    const res = await fetch(`${GEMINI_API_URL}?key=${encodeURIComponent(key)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: 'Respond with the single word: "READY"' }],
-          },
-        ],
-        generationConfig: {
-          maxOutputTokens: 10,
-        },
-      }),
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+    const res = await fetch(`${base}/api/tags`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
     });
 
+    clearTimeout(timeoutId);
+
     if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      const msg = errData?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
-      return { success: false, model: 'gemini-1.5-flash', message: msg };
+      return {
+        success: false,
+        model,
+        models: [],
+        message: `HTTP ${res.status}: Connected to endpoint, but server returned an error status.`,
+      };
     }
+
+    const data = await res.json();
+    const rawList = Array.isArray(data?.models) ? data.models : [];
+    const models: string[] = rawList
+      .map((m: { name?: string; model?: string }) => m.name || m.model || '')
+      .filter((n: string) => n.length > 0);
+
+    const isTargetInstalled = models.some(
+      (m) => m === model || m.startsWith(`${model}:`) || m.includes(model)
+    );
+
+    const note = isTargetInstalled
+      ? `Model "${model}" is ready for live local inference.`
+      : models.length > 0
+      ? `Connected, but target model "${model}" is not in installed list. Available: ${models.slice(0, 3).join(', ')}`
+      : 'Ollama is active with 0 local models downloaded.';
 
     return {
       success: true,
-      model: 'gemini-1.5-flash',
-      message: 'Connected successfully to Google Gemini 1.5 Flash REST API!',
+      model,
+      models,
+      message: `Active! Detected ${models.length} local model(s) on workstation. ${note}`,
     };
   } catch (err) {
+    const isCorsOrConnRefused = err instanceof TypeError || (err instanceof Error && err.name === 'AbortError');
     return {
       success: false,
-      model: 'gemini-1.5-flash',
-      message: err instanceof Error ? err.message : 'Network failure reaching Gemini API.',
+      model,
+      models: [],
+      message: isCorsOrConnRefused
+        ? `Cannot reach Ollama at ${base}. To allow browser access, run in PowerShell: $env:OLLAMA_ORIGINS="*"; ollama serve`
+        : `Connection error: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
 }
 
 /**
- * Offline deterministic fallback for Civic First-Aid Triage
+ * Core query engine for local Ollama REST API with native fetch and strict JSON format
+ */
+async function queryOllamaJSON<T>(
+  prompt: string,
+  systemInstruction?: string,
+  timeoutMs = 25000
+): Promise<T | null> {
+  const endpoint = getOllamaEndpoint().replace(/\/+$/, '');
+  const model = getOllamaModel();
+  const fullPrompt = systemInstruction ? `${systemInstruction}\n\n${prompt}` : prompt;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(`${endpoint}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        prompt: fullPrompt,
+        stream: false,
+        format: 'json',
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      console.warn(`[Ollama AI] Request failed with HTTP ${res.status}`);
+      return null;
+    }
+
+    const data = await res.json();
+    let responseText = data?.response;
+    if (!responseText || typeof responseText !== 'string') {
+      return null;
+    }
+
+    // Strip markdown code fences if model enclosed JSON in ```json ... ```
+    if (responseText.includes('```')) {
+      responseText = responseText.replace(/```(?:json)?\s*([\s\S]*?)\s*```/, '$1').trim();
+    }
+
+    return JSON.parse(responseText) as T;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    console.warn('[Ollama AI] Local inference unavailable or timed out, activating heuristic fallback:', err);
+    return null;
+  }
+}
+
+/**
+ * Deterministic offline heuristic fallback for Civic First-Aid Triage
  */
 function getDeterministicFirstAidTriage(
   transcript: string,
@@ -134,7 +247,6 @@ function getDeterministicFirstAidTriage(
 ): CivicFirstAidTriageResult {
   const text = `${transcript} ${category}`.toLowerCase();
 
-  // Check for routine wear-and-tear triggers
   const isPlumbingRoutine =
     text.includes('valve') ||
     text.includes('वाल्व') ||
@@ -240,205 +352,130 @@ function getDeterministicFirstAidTriage(
 
 /**
  * 1. AI First-Aid Triage & Local Livelihood Dispatch
- * Evaluates whether an issue is routine maintenance or structural innovation challenge
+ * Evaluates whether an issue is routine maintenance or structural innovation challenge via Local Ollama
  */
 export async function evaluateCivicFirstAidTriage(
   transcript: string,
   category: string,
-  village: string
+  village = 'Jharkhand Village'
 ): Promise<CivicFirstAidTriageResult> {
-  const apiKey = getGeminiApiKey();
-
-  if (!apiKey) {
-    return getDeterministicFirstAidTriage(transcript, category, village);
-  }
-
-  const prompt = `
-You are the AI First-Aid Civic Triage Engine for Project Udbhav (Department of Higher & Technical Education, Government of Jharkhand).
-Your task is to analyze the following rural citizen report from Jharkhand village "${village}".
-Determine whether this issue is:
-A) Routine maintenance serviceable by local rural tradespeople (Plumber, Electrician, Mechanic, Mason) such as a clogged valve, tripped breaker, cracked apron, or worn gasket.
-OR
-B) Chronic, structural civic friction (e.g., severe groundwater arsenic/fluoride poisoning, zero-grid post-harvest cold chain absence, river embankment scouring) requiring university capstone engineering R&D.
-
-Issue Category: "${category}"
-Citizen Description / Vernacular Transcription:
-"${transcript}"
-
-CRITICAL SYSTEM DIRECTIVE:
-You MUST respond with ONLY valid JSON adhering strictly to this schema:
+  const systemInstruction = `
+You are an expert rural engineering diagnostician for the Government of Jharkhand. Evaluate whether the reported issue is routine maintenance or chronic innovation R&D. Return ONLY valid JSON matching this schema:
 {
   "isRoutineMaintenance": boolean,
   "suggestedTechnicianTrade": "PLUMBER" | "ELECTRICIAN" | "MECHANIC" | "MASON" | null,
-  "vernacularTroubleshootingTip": "Simple, actionable DIY advice in Hindi/Vernacular (1-2 sentences)",
+  "vernacularTroubleshootingTip": "Simple, actionable DIY advice in Hindi/Vernacular",
   "technicianContactSimulation": {
     "tradeTitle": "Official rural trade title in Hindi/English",
     "contactName": "Realistic rural name from Jharkhand",
-    "approxDistanceKm": number
+    "approxDistanceKm": number,
+    "contactPhone": "Phone number string"
   },
   "escalateToCivicRD": boolean,
-  "confidenceScore": number (between 0.0 and 1.0),
+  "confidenceScore": number,
   "reasoningSummary": "Clear 1-sentence analytical rationale"
 }
 `;
 
-  try {
-    const response = await fetch(`${GEMINI_API_URL}?key=${encodeURIComponent(apiKey)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: prompt }],
-          },
-        ],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.2,
-        },
-      }),
-    });
+  const userPayload = `
+Rural Citizen Report Context:
+- Village / Panchayat: "${village}"
+- Issue Category: "${category}"
+- Spoken Audio Transcript: "${transcript}"
+`;
 
-    if (!response.ok) {
-      console.warn('[Gemini AI] Triage API call failed, using deterministic fallback');
-      return getDeterministicFirstAidTriage(transcript, category, village);
-    }
+  const result = await queryOllamaJSON<CivicFirstAidTriageResult>(userPayload, systemInstruction);
 
-    const data = await response.json();
-    const rawJsonText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!rawJsonText) {
-      return getDeterministicFirstAidTriage(transcript, category, village);
-    }
-
-    const parsed = JSON.parse(rawJsonText) as CivicFirstAidTriageResult;
+  if (result && typeof result.isRoutineMaintenance === 'boolean') {
     return {
-      isRoutineMaintenance: Boolean(parsed.isRoutineMaintenance),
-      suggestedTechnicianTrade: parsed.suggestedTechnicianTrade || null,
+      isRoutineMaintenance: Boolean(result.isRoutineMaintenance),
+      suggestedTechnicianTrade: result.suggestedTechnicianTrade || null,
       vernacularTroubleshootingTip:
-        parsed.vernacularTroubleshootingTip ||
+        result.vernacularTroubleshootingTip ||
         'कृपया समस्या स्थल पर सुरक्षा मानकों का पालन करें।',
       technicianContactSimulation: {
         tradeTitle:
-          parsed.technicianContactSimulation?.tradeTitle ||
+          result.technicianContactSimulation?.tradeTitle ||
           'स्थानीय ग्राम पंचायत तकनीशियन',
         contactName:
-          parsed.technicianContactSimulation?.contactName || 'संजय महतो',
+          result.technicianContactSimulation?.contactName || 'राजू महतो',
         approxDistanceKm:
-          Number(parsed.technicianContactSimulation?.approxDistanceKm) || 1.5,
-        contactPhone: '+91 94311-74921',
+          Number(result.technicianContactSimulation?.approxDistanceKm) || 1.5,
+        contactPhone:
+          result.technicianContactSimulation?.contactPhone || '+91 94311-74921',
       },
-      escalateToCivicRD: Boolean(parsed.escalateToCivicRD),
-      confidenceScore: Number(parsed.confidenceScore) || 0.85,
+      escalateToCivicRD: Boolean(result.escalateToCivicRD),
+      confidenceScore: Math.min(1, Math.max(0, Number(result.confidenceScore) || 0.85)),
       reasoningSummary:
-        parsed.reasoningSummary ||
+        result.reasoningSummary ||
         'विश्लेषण पूर्ण: प्राथमिकता स्तर निर्धारित किया गया।',
     };
-  } catch (err) {
-    console.error('[Gemini AI] Error in evaluateCivicFirstAidTriage:', err);
-    return getDeterministicFirstAidTriage(transcript, category, village);
   }
+
+  // Graceful deterministic fallback
+  return getDeterministicFirstAidTriage(transcript, category, village);
+}
+
+interface LLMBriefJSONResponse {
+  title?: string;
+  domainSector?: DomainSector;
+  contextSummary?: string;
+  boundaryConstraints?: string[];
+  measurableBenchmarks?: Array<{
+    metric: string;
+    targetValue: string;
+    tolerance: string;
+  }>;
+  maxCostINR?: number;
 }
 
 /**
- * 2. AI Problem Boundary Generator (No Pre-Cooked Solutions)
- * Uses Gemini 1.5 Flash to extract non-negotiable operational boundaries and measurable benchmarks
+ * 2. Academic Problem Boundary Brief Generator (No Pre-Cooked Solutions)
+ * Uses Local Ollama to extract non-negotiable operational boundaries and quantitative benchmarks (BOM <= ₹2,500)
  */
 export async function generateLLMProblemBoundaryBrief(
-  params: IssueForBoundaryGeneration
+  params: ProblemBriefInput
 ): Promise<EngineeringProblemBrief> {
-  const apiKey = getGeminiApiKey();
-
-  // If no API key is configured, fallback to rule-based boundary generator
-  if (!apiKey) {
-    return generateProblemBoundaryBrief(params);
-  }
-
-  const prompt = `
-You are the AI Problem Boundary Brief Generator for Project Udbhav (SIH PS ID: 26043 — Department of Higher & Technical Education, Jharkhand).
-Your purpose is to convert an endorsed grassroots civic problem into an accredited Engineering Problem Brief for multidisciplinary engineering collegiate capstone teams (NEP 2020).
-
-CRITICAL HACKATHON RULE & JURY DEFENSE DIRECTIVE:
-You must output ONLY:
-1. Operational constraints (e.g. power limits, ambient temperature limits, physical footprint, locally available raw materials).
-2. Measurable benchmarks with numerical targets and tolerances (e.g. flow rate >= 4 L/min, arsenic < 0.01 mg/L).
-3. Statutory BOM cost ceiling strictly capped <= ₹2,500.
-YOU ARE STRICTLY FORBIDDEN from proposing architecture, prescriptive circuits, software algorithms, or implementation solutions. The student engineers must design their own solution within the boundaries.
-
-Problem Details:
-- Master Issue ID: "${params.id}"
-- Citizen Report & Audio Transcription: "${params.transcriptionText}"
-- Category: "${params.category || 'General Civic Infrastructure'}"
-- Location: District ${params.district}, Block ${params.block}, Jharkhand
-- Impact: ${params.affectedHouseholds} households
-- Panchayat Inspection Note: "${params.panchayatNote}"
-- Severity: "${params.severity}"
-
-CRITICAL SYSTEM DIRECTIVE:
-You MUST respond with ONLY valid JSON adhering strictly to this schema:
+  const systemInstruction = `
+You are the DHTE Jharkhand Academic Problem Boundary Generator under SIH PS-26043. Convert field evidence into operational boundaries, measurable quantitative benchmarks, and a maximum Bill of Materials (BOM) cost ceiling (strictly <= ₹2,500). DO NOT generate code, circuits, or prescriptive implementations. Return ONLY valid JSON adhering to this schema:
 {
   "title": "Concise, formal engineering problem title (max 90 chars)",
   "domainSector": "WATER_RESOURCES" | "AGRITECH" | "RURAL_ENERGY" | "SANITATION" | "HEALTHCARE" | "CIVIL_INFRA",
   "contextSummary": "Rigorous technical summary of the localized challenge (2-3 sentences)",
   "boundaryConstraints": [
-    "Constraint 1 (e.g. Zero-grid power requirement or micro-solar <=50W)",
-    "Constraint 2 (e.g. Maximum footprint <= 0.8 sq.m)",
-    "Constraint 3 (e.g. Local material requirement)",
-    "Constraint 4 (e.g. BOM manufacturing cost capped strictly <= ₹2,500)"
+    "Constraint 1 (power limit e.g. off-grid <=30W)",
+    "Constraint 2 (physical footprint limit e.g. <= 1.0 sq.m)",
+    "Constraint 3 (locally available raw materials only)",
+    "Constraint 4 (BOM manufacturing cost capped strictly <= ₹2,500)"
   ],
   "measurableBenchmarks": [
     {
       "metric": "Engineering metric name",
       "targetValue": "Quantifiable target value",
       "tolerance": "Permissible tolerance (e.g. ±5%)"
-    },
-    {
-      "metric": "Engineering metric name 2",
-      "targetValue": "Quantifiable target value",
-      "tolerance": "Permissible tolerance"
-    },
-    {
-      "metric": "Engineering metric name 3",
-      "targetValue": "Quantifiable target value",
-      "tolerance": "Permissible tolerance"
     }
   ],
-  "maxCostINR": number (between 1800 and 2500)
+  "maxCostINR": number
 }
 `;
 
-  try {
-    const response = await fetch(`${GEMINI_API_URL}?key=${encodeURIComponent(apiKey)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: prompt }],
-          },
-        ],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.2,
-        },
-      }),
-    });
+  const userPayload = `
+Field Evidence Details:
+- Master Issue ID: "${params.id}"
+- Citizen Audio Transcript: "${params.transcriptionText}"
+- Category: "${params.category || 'General Rural Infrastructure'}"
+- District: "${params.district}", Block: "${params.block}", Jharkhand
+- Affected Households: ${params.affectedHouseholds}
+- Panchayat Inspection Audit: "${params.panchayatNote}"
+- Severity: "${params.severity}"
+`;
 
-    if (!response.ok) {
-      console.warn('[Gemini AI] Brief API call failed, falling back to deterministic generator');
-      return generateProblemBoundaryBrief(params);
-    }
+  const parsed = await queryOllamaJSON<LLMBriefJSONResponse>(userPayload, systemInstruction);
 
-    const data = await response.json();
-    const rawJsonText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!rawJsonText) {
-      return generateProblemBoundaryBrief(params);
-    }
-
-    const parsed = JSON.parse(rawJsonText);
-
-    // Sanitize cost to ensure statutory ceiling <= ₹2,500 is never breached
+  if (parsed && parsed.title && Array.isArray(parsed.boundaryConstraints)) {
+    // Strictly bound BOM cost to <= ₹2,500
     const cost = Math.min(
-      Math.max(Number(parsed.maxCostINR) || 2450, 1500),
+      Math.max(Number(parsed.maxCostINR) || 2450, 1200),
       MAX_BRIEF_BUDGET_INR
     );
 
@@ -450,24 +487,19 @@ You MUST respond with ONLY valid JSON adhering strictly to this schema:
       'HEALTHCARE',
       'CIVIL_INFRA',
     ];
-    const domainSector: DomainSector = validSectors.includes(parsed.domainSector)
-      ? parsed.domainSector
-      : 'WATER_RESOURCES';
+    const domainSector: DomainSector =
+      parsed.domainSector && validSectors.includes(parsed.domainSector)
+        ? parsed.domainSector
+        : 'WATER_RESOURCES';
 
     return {
       id: `BRIEF-JH-AI-${Date.now().toString().slice(-6)}`,
       masterIssueId: params.id,
-      title: parsed.title || 'Engineering Problem Boundary Brief',
+      title: parsed.title,
       domainSector,
       contextSummary: parsed.contextSummary || params.panchayatNote,
-      boundaryConstraints: Array.isArray(parsed.boundaryConstraints)
-        ? parsed.boundaryConstraints
-        : [
-            '100% off-grid operation',
-            'Manufacturable from locally procurable components',
-            'BOM unit cost capped <= ₹2,500',
-          ],
-      measurableBenchmarks: Array.isArray(parsed.measurableBenchmarks)
+      boundaryConstraints: parsed.boundaryConstraints,
+      measurableBenchmarks: Array.isArray(parsed.measurableBenchmarks) && parsed.measurableBenchmarks.length > 0
         ? parsed.measurableBenchmarks
         : [
             {
@@ -488,70 +520,92 @@ You MUST respond with ONLY valid JSON adhering strictly to this schema:
       status: 'OPEN_FOR_CLAIMS',
       createdAt: Date.now(),
     };
-  } catch (err) {
-    console.error('[Gemini AI] Error in generateLLMProblemBoundaryBrief:', err);
-    return generateProblemBoundaryBrief(params);
   }
+
+  // Graceful deterministic fallback
+  return generateProblemBoundaryBrief(params);
 }
 
 /**
  * 3. Grounded Field Clarification Chatbot
- * Answers student questions using ONLY confirmed field reports, transparently flagging unverified points
+ * Answers student solver inquiries using ONLY confirmed field records via Local Ollama
  */
 export async function askGroundZeroClarification(
   studentQuestion: string,
   fieldReportContext: string
 ): Promise<string> {
-  const apiKey = getGeminiApiKey();
-
-  if (!apiKey) {
-    return `[Field Clarification System] Verified Field Report Record: "${fieldReportContext.slice(0, 200)}...". Note: Live Gemini LLM is offline; for real-time natural language query answering, configure a Gemini API key.`;
-  }
-
-  const prompt = `
+  const systemInstruction = `
 You are the Ground-Zero Clarification Assistant for Project Udbhav (Jharkhand Civic Capstone Network).
-Student solvers are designing an engineering solution and have asked a question regarding the field report.
-
-GROUND TRUTH FIELD REPORT & INSPECTION NOTES:
-"${fieldReportContext}"
-
-STUDENT QUESTION:
-"${studentQuestion}"
-
-CRITICAL ACCREDITATION RULE:
-You MUST answer the question using ONLY the confirmed facts from the field report above.
-If the question asks for parameters NOT present in the field report (e.g. pipe outer diameter, water table depth in meters, soil pH), you MUST explicitly state:
+Answer student questions using ONLY confirmed field reports. If parameters are not in the field report, state:
 "Data not in field report; requires verification from Panchayat Sachiv via Technical Query Bridge."
-Do NOT invent, guess, or extrapolate unverified field measurements.
+Do NOT invent or extrapolate unverified field measurements.
 `;
 
+  const userPayload = `
+CONFIRMED FIELD REPORT:
+"${fieldReportContext}"
+
+STUDENT INQUIRY:
+"${studentQuestion}"
+`;
+
+  const endpoint = getOllamaEndpoint().replace(/\/+$/, '');
+  const model = getOllamaModel();
+
   try {
-    const response = await fetch(`${GEMINI_API_URL}?key=${encodeURIComponent(apiKey)}`, {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+    const res = await fetch(`${endpoint}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: prompt }],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: 300,
-        },
+        model,
+        prompt: `${systemInstruction}\n\n${userPayload}`,
+        stream: false,
       }),
+      signal: controller.signal,
     });
 
-    if (!response.ok) {
-      return `Data from field report: ${fieldReportContext.slice(0, 160)}... (Live query service temporarily unavailable)`;
-    }
+    clearTimeout(timeoutId);
 
-    const data = await response.json();
-    return (
-      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      'No field clarification output received.'
-    );
-  } catch (err) {
-    return 'Field Clarification Service Error: ' + (err instanceof Error ? err.message : String(err));
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.response && typeof data.response === 'string') {
+        return data.response.trim();
+      }
+    }
+  } catch {
+    // Fall through to deterministic fallback
   }
+
+  return `[Field Clarification Record]: ${fieldReportContext.slice(0, 220)}... (Note: Local Ollama daemon unreachable or offline; response based directly on confirmed Panchayat inspection notes).`;
+}
+
+// ============================================================================
+// BACKWARD-COMPATIBILITY STUBS (Safe transitions from legacy cloud references)
+// ============================================================================
+
+export function getGeminiApiKey(): string {
+  return '';
+}
+
+export function setGeminiApiKey(_key: string): void {
+  // Legacy stub
+}
+
+export function hasGeminiApiKey(): boolean {
+  return false;
+}
+
+export async function testGeminiConnection(): Promise<{
+  success: boolean;
+  model: string;
+  message: string;
+}> {
+  return {
+    success: false,
+    model: 'Migrated to Local Ollama',
+    message: 'Cloud API keys deprecated in favor of zero-key Local Ollama AI REST engine.',
+  };
 }

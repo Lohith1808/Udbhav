@@ -1,112 +1,115 @@
 /**
  * Project Udbhav (SIH PS ID: 26043 — DHTE Jharkhand)
- * System-Wide User Session, Profile Verification & RBAC Types
+ * System-Wide User Session, Tamper-Resistant RBAC & Verification Types (Sprint 5 — Task 5.3)
  * 
- * Addresses Bug 1 (Profile Verification & RBAC) and enables Cross-Device State Sync.
+ * Rectifies Bug 1 (Cosmetic profile verification & console role bypass):
+ * - Removed plain-text verification secrets from client-exposed types.
+ * - Added tamper-resistant session signature (SHA-256(role + verifiedAt + salt)).
+ * - Enforces zero-trust cross-device verification.
  */
 
 import { UserRole } from './ingestion';
 
 export interface UserSession {
-  userId: string;
+  userId?: string;
   role: UserRole;
-  maskedIdentifier: string; // e.g. "Citizen #JH-7492" or "Panchayat #JH-BDO-12"
-  fullName: string;
-  institutionOrPanchayat: string;
   isVerified: boolean;
-  verificationBadge?: string; // e.g. "OFFICIAL_PANCHAYAT_KEY_VALIDATED"
+  maskedIdentifier: string; // e.g., 'Citizen #JH-8492' or 'Officer #JH-SEC-104'
+  fullName?: string;
+  institutionOrOrg?: string;
+  institutionOrPanchayat?: string; // Backwards-compatible alias
+  verifiedAt?: number;
+  sessionSignature?: string; // SHA-256(role + verifiedAt + salt)
+  verificationBadge?: string;
   competencies?: string[];
-  activeProjectsCount: number;
+  activeProjectsCount?: number;
 }
 
-export interface VerificationTokenDefinition {
-  code: string;
+export interface RoleCredentialMetadata {
   targetRole: UserRole;
-  badge: string;
   officialTitle: string;
   issuingAuthority: string;
+  badge: string;
   sampleHolder: string;
 }
 
 /**
- * Recognized Official Government & Institutional Verification Keys
- * Used for instant authentication and jury-defense during SIH evaluation.
+ * Public institutional role metadata (Zero plain-text verification secrets exposed)
  */
-export const OFFICIAL_VERIFICATION_KEYS: Record<string, VerificationTokenDefinition> = {
-  'JH-PANCHAYAT-SEC-2026': {
-    code: 'JH-PANCHAYAT-SEC-2026',
+export const ROLE_CREDENTIAL_METADATA: Record<UserRole, RoleCredentialMetadata> = {
+  CITIZEN: {
+    targetRole: 'CITIZEN',
+    officialTitle: 'Gramin Citizen / Grassroots Reporter',
+    issuingAuthority: 'UIDAI / Aadhaar Mobile WebOTP Gateway',
+    badge: 'AADHAAR_WEBOTP_VERIFIED',
+    sampleHolder: 'Ramesh Munda',
+  },
+  PANCHAYAT_OFFICER: {
     targetRole: 'PANCHAYAT_OFFICER',
-    badge: 'OFFICIAL_PANCHAYAT_KEY_VALIDATED',
     officialTitle: 'Panchayat Secretary (Gram Sachiv)',
     issuingAuthority: 'Department of Panchayati Raj, Govt of Jharkhand',
+    badge: 'OFFICIAL_PANCHAYAT_KEY_VALIDATED',
     sampleHolder: 'Sanjay Soren',
   },
-  'AICTE-STUDENT-BIT-2026': {
-    code: 'AICTE-STUDENT-BIT-2026',
+  STUDENT_SOLVER: {
     targetRole: 'STUDENT_SOLVER',
-    badge: 'AICTE_STUDENT_ID_VERIFIED',
     officialTitle: 'B.Tech Capstone Team Lead',
     issuingAuthority: 'Birla Institute of Technology (BIT) Mesra / AICTE Portal',
+    badge: 'AICTE_STUDENT_ID_VERIFIED',
     sampleHolder: 'Aman Verma',
   },
-  'AICTE-FAC-NITJ-2026': {
-    code: 'AICTE-FAC-NITJ-2026',
+  FACULTY_MENTOR: {
     targetRole: 'FACULTY_MENTOR',
-    badge: 'AICTE_FACULTY_CREDENTIAL_VERIFIED',
     officialTitle: 'Associate Professor & Capstone Supervisor',
     issuingAuthority: 'National Institute of Technology (NIT) Jamshedpur',
+    badge: 'AICTE_FACULTY_CREDENTIAL_VERIFIED',
     sampleHolder: 'Dr. Arvind Kumar',
   },
-  'MCA-CSR-TATA-2026': {
-    code: 'MCA-CSR-TATA-2026',
+  INDUSTRY_CSR: {
     targetRole: 'INDUSTRY_CSR',
-    badge: 'MCA_CSR_SECTION_135_VALIDATED',
     officialTitle: 'Head of Corporate Social Responsibility',
     issuingAuthority: 'Ministry of Corporate Affairs (MCA) / Tata Steel CSR Foundation',
+    badge: 'MCA_CSR_SECTION_135_VALIDATED',
     sampleHolder: 'Rohit Singhania',
   },
-  'DHTE-GOVT-JH-2026': {
-    code: 'DHTE-GOVT-JH-2026',
+  GOVT_ADMIN: {
     targetRole: 'GOVT_ADMIN',
-    badge: 'GOVT_JHARKHAND_STATE_SECRETARIAT_VALIDATED',
     officialTitle: 'State Nodal Officer & Joint Secretary',
     issuingAuthority: 'Department of Higher & Technical Education (DHTE), Ranchi',
+    badge: 'GOVT_JHARKHAND_STATE_SECRETARIAT_VALIDATED',
     sampleHolder: 'Smt. Priyanka Jha, IAS',
   },
-  'BIS-CSIR-CIMFR-2026': {
-    code: 'BIS-CSIR-CIMFR-2026',
+  ACCREDITED_EVALUATOR: {
     targetRole: 'ACCREDITED_EVALUATOR',
-    badge: 'BIS_NABL_INDEPENDENT_EVALUATOR_CERTIFIED',
     officialTitle: 'Chief Scientist & NABL Signatory',
     issuingAuthority: 'CSIR - Central Institute of Mining & Fuel Research (CIMFR), Dhanbad',
+    badge: 'BIS_NABL_INDEPENDENT_EVALUATOR_CERTIFIED',
     sampleHolder: 'Dr. P. K. Singh',
   },
 };
 
 /**
- * Pre-configured verified baseline sessions for each Quadruple-Helix Persona
+ * Baseline initial unverified session prototypes for Quadruple-Helix stakeholders
  */
-export const PRESET_USER_SESSIONS: Record<UserRole, UserSession> = {
+export const BASELINE_UNVERIFIED_SESSIONS: Record<UserRole, UserSession> = {
   CITIZEN: {
     userId: 'user-cit-7492',
     role: 'CITIZEN',
-    maskedIdentifier: 'Citizen #JH-7492',
+    maskedIdentifier: 'Citizen #JH-8492',
     fullName: 'Ramesh Munda',
+    institutionOrOrg: 'Gram Panchayat Angara, Ranchi',
     institutionOrPanchayat: 'Gram Panchayat Angara, Ranchi',
-    isVerified: true,
-    verificationBadge: 'AADHAAR_WEBOTP_VERIFIED',
-    competencies: ['Rural Community Intake', 'Water Infrastructure'],
+    isVerified: false,
     activeProjectsCount: 1,
   },
   PANCHAYAT_OFFICER: {
     userId: 'user-pan-012',
     role: 'PANCHAYAT_OFFICER',
-    maskedIdentifier: 'Panchayat #JH-BDO-12',
+    maskedIdentifier: 'Officer #JH-SEC-104',
     fullName: 'Sanjay Soren (Panchayat Sachiv)',
+    institutionOrOrg: 'Arsande Gram Panchayat, Kanke, Ranchi',
     institutionOrPanchayat: 'Arsande Gram Panchayat, Kanke, Ranchi',
-    isVerified: true,
-    verificationBadge: 'OFFICIAL_PANCHAYAT_KEY_VALIDATED',
-    competencies: ['Physical Inspection', 'Gram Sabha Endorsement', 'LGD Verification'],
+    isVerified: false,
     activeProjectsCount: 3,
   },
   STUDENT_SOLVER: {
@@ -114,10 +117,9 @@ export const PRESET_USER_SESSIONS: Record<UserRole, UserSession> = {
     role: 'STUDENT_SOLVER',
     maskedIdentifier: 'Solver #JH-ENG-2024',
     fullName: 'Aman Verma (Team Lead)',
-    institutionOrPanchayat: 'BIT Mesra, Ranchi (Mechanical & CS)',
-    isVerified: true,
-    verificationBadge: 'AICTE_STUDENT_ID_VERIFIED',
-    competencies: ['IoT Telemetry', 'Passive Filtration', 'CAD Prototyping'],
+    institutionOrOrg: 'BIT Mesra, Ranchi',
+    institutionOrPanchayat: 'BIT Mesra, Ranchi',
+    isVerified: false,
     activeProjectsCount: 1,
   },
   FACULTY_MENTOR: {
@@ -125,10 +127,9 @@ export const PRESET_USER_SESSIONS: Record<UserRole, UserSession> = {
     role: 'FACULTY_MENTOR',
     maskedIdentifier: 'Mentor #JH-FAC-88',
     fullName: 'Dr. Arvind Kumar (Associate Professor)',
+    institutionOrOrg: 'NIT Jamshedpur (Mechanical Engg)',
     institutionOrPanchayat: 'NIT Jamshedpur (Mechanical Engg)',
-    isVerified: true,
-    verificationBadge: 'AICTE_FACULTY_CREDENTIAL_VERIFIED',
-    competencies: ['Fluid Dynamics', 'Arsenic Remediation', 'Field Safety'],
+    isVerified: false,
     activeProjectsCount: 2,
   },
   INDUSTRY_CSR: {
@@ -136,10 +137,9 @@ export const PRESET_USER_SESSIONS: Record<UserRole, UserSession> = {
     role: 'INDUSTRY_CSR',
     maskedIdentifier: 'CSR #JH-TATA-01',
     fullName: 'Rohit Singhania (CSR Lead)',
+    institutionOrOrg: 'Tata Steel Foundation, Jamshedpur',
     institutionOrPanchayat: 'Tata Steel Foundation, Jamshedpur',
-    isVerified: true,
-    verificationBadge: 'MCA_CSR_SECTION_135_VALIDATED',
-    competencies: ['WASH Projects', 'Schedule VII Grants', 'Rural Tech Transfer'],
+    isVerified: false,
     activeProjectsCount: 2,
   },
   GOVT_ADMIN: {
@@ -147,10 +147,9 @@ export const PRESET_USER_SESSIONS: Record<UserRole, UserSession> = {
     role: 'GOVT_ADMIN',
     maskedIdentifier: 'Admin #JH-DHTE-01',
     fullName: 'Smt. Priyanka Jha, IAS (Director)',
+    institutionOrOrg: 'Dept. of Higher & Technical Education, Ranchi',
     institutionOrPanchayat: 'Dept. of Higher & Technical Education, Ranchi',
-    isVerified: true,
-    verificationBadge: 'GOVT_JHARKHAND_STATE_SECRETARIAT_VALIDATED',
-    competencies: ['Statewide GIS Policy', 'HEI NIRF Monitoring', 'GeM Fast-track'],
+    isVerified: false,
     activeProjectsCount: 0,
   },
   ACCREDITED_EVALUATOR: {
@@ -158,10 +157,11 @@ export const PRESET_USER_SESSIONS: Record<UserRole, UserSession> = {
     role: 'ACCREDITED_EVALUATOR',
     maskedIdentifier: 'Evaluator #JH-BIS-01',
     fullName: 'Dr. P. K. Singh (Chief Scientist)',
+    institutionOrOrg: 'CSIR-CIMFR Dhanbad',
     institutionOrPanchayat: 'CSIR-CIMFR Dhanbad',
-    isVerified: true,
-    verificationBadge: 'BIS_NABL_INDEPENDENT_EVALUATOR_CERTIFIED',
-    competencies: ['IS 10500 Potability Testing', 'Material Stress Verification'],
+    isVerified: false,
     activeProjectsCount: 1,
   },
 };
+
+export const PRESET_USER_SESSIONS = BASELINE_UNVERIFIED_SESSIONS;

@@ -2,13 +2,17 @@
  * Project Udbhav (SIH PS ID: 26043 — DHTE Jharkhand)
  * Push-to-Talk Vernacular Audio Voice Recorder Component
  * 
- * Strict Anti-Fraud & Reliability Guardrails (Sprint 4 - Task 4.1):
- * 1. Secure Context Check: Validates window.isSecureContext prior to media access.
- * 2. Adaptive MIME Support: Dynamically selects best supported audio codec across
- *    Chrome, Safari (iOS/macOS), Edge, and Firefox without crashing.
- * 3. Mobile / iOS Resilience: Explicit track termination and zero-byte buffer handling.
- * 4. Memory Leak Defense: Automatic Object URL revocation on reset and component unmount.
- * 5. Low Data Footprint: Voice-optimized bitrate (32 kbps) capped at 60 seconds.
+ * Strict Anti-Fraud & Reliability Guardrails (Sprint 5 - Task 5.1):
+ * 1. Secure Context & Origin Check: Detects window.isSecureContext and displays non-blocking
+ *    diagnostic toast ("Microphone access requires HTTPS or http://localhost").
+ * 2. Resilient Codec & Streaming Chunk Configuration: Probes supported mimeTypes dynamically
+ *    (['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac']), streaming chunks
+ *    every 250ms via mediaRecorder.start(250) to prevent 0-byte blob truncation.
+ * 3. Chunks Concatenation: All streaming chunks concatenated into a validated single Blob.
+ * 4. Hardware Cleanup: Immediate track termination (stream.getTracks().forEach(t => t.stop()))
+ *    upon recording stop, cancellation, or unmount.
+ * 5. Memory Leak Defense: Object URL revocation and timer cleanup.
+ * 6. Jharkhand GIGW 3.0 Theme: Government Maroon (#7A1B1B), Navy (#0F2537), Amber (#F8E7A2).
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
@@ -41,13 +45,17 @@ export interface AudioVoiceRecorderProps {
 
 const MAX_RECORDING_SECONDS = 60;
 
-const ADAPTIVE_MIME_TYPES = [
-  'audio/webm;codecs=opus',
-  'audio/webm',
-  'audio/ogg',
-  'audio/mp4',
-  'audio/aac',
-];
+/** Probes dynamically supported audio MIME types across modern browsers & mobile OS */
+const probeSupportedMimeType = (): string => {
+  if (
+    typeof MediaRecorder === 'undefined' ||
+    typeof MediaRecorder.isTypeSupported !== 'function'
+  ) {
+    return '';
+  }
+  const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac'];
+  return mimeTypes.find((type) => MediaRecorder.isTypeSupported(type)) || '';
+};
 
 export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
   onAudioRecorded,
@@ -73,22 +81,22 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
   const activeUrlRef = useRef<string | null>(audioUrl);
   const durationRef = useRef<number>(initialDurationSeconds);
 
-  // Check whether origin is a Secure Context for MediaDevices
-  const isSecureOrigin =
+  // Secure Context & Origin Check
+  const isSecure =
     typeof window !== 'undefined'
-      ? Boolean(
-          window.isSecureContext ||
-            window.location.hostname === 'localhost' ||
-            window.location.hostname === '127.0.0.1'
-        )
+      ? window.isSecureContext !== false &&
+        (window.isSecureContext ||
+          window.location.protocol === 'https:' ||
+          window.location.hostname === 'localhost' ||
+          window.location.hostname === '127.0.0.1')
       : true;
 
-  // Keep active URL ref updated
+  // Keep active URL ref updated for unmount revocation
   useEffect(() => {
     activeUrlRef.current = audioUrl;
   }, [audioUrl]);
 
-  // Stop and release media stream tracks
+  // Hardware Cleanup: Stop and release all audio tracks immediately
   const stopStreamTracks = useCallback(() => {
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => {
@@ -122,17 +130,6 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
     return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
   };
 
-  // Determine best supported MIME type dynamically
-  const resolveSupportedMimeType = (): string => {
-    if (
-      typeof MediaRecorder === 'undefined' ||
-      typeof MediaRecorder.isTypeSupported !== 'function'
-    ) {
-      return '';
-    }
-    return ADAPTIVE_MIME_TYPES.find((type) => MediaRecorder.isTypeSupported(type)) || '';
-  };
-
   // Stop recording execution
   const stopRecording = useCallback(() => {
     if (timerIntervalRef.current) {
@@ -140,14 +137,15 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
       timerIntervalRef.current = null;
     }
 
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       try {
         mediaRecorderRef.current.stop();
       } catch (err) {
-        console.warn('[AudioRecorder] Error stopping MediaRecorder:', err);
+        console.warn('[AudioVoiceRecorder] Error stopping MediaRecorder:', err);
       }
     }
 
+    // Hardware cleanup: Stop all audio tracks immediately
     stopStreamTracks();
     setIsRecording(false);
   }, [stopStreamTracks]);
@@ -158,11 +156,11 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
     setShowClearConfirm(false);
 
     // 1. Secure context guardrail
-    if (!isSecureOrigin) {
+    if (!isSecure) {
       setErrorMessage(
         language === 'hi'
-          ? 'माइक्रोफ़ोन के लिए HTTPS या localhost सुरक्षित कनेक्शन आवश्यक है।'
-          : 'Microphone requires HTTPS or localhost secure context.'
+          ? 'माइक्रोफ़ोन एक्सेस के लिए HTTPS या http://localhost आवश्यक है'
+          : 'Microphone access requires HTTPS or http://localhost'
       );
       return;
     }
@@ -189,31 +187,31 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
       mediaStreamRef.current = stream;
       chunksRef.current = [];
 
-      // 3. Adaptive MIME Support resolution
-      const supportedMimeType = resolveSupportedMimeType();
+      // 3. Resilient Codec selection
+      const selectedMime = probeSupportedMimeType();
 
       let recorder: MediaRecorder;
       const recorderOptions: MediaRecorderOptions = {};
 
-      if (supportedMimeType) {
-        recorderOptions.mimeType = supportedMimeType;
+      if (selectedMime) {
+        recorderOptions.mimeType = selectedMime;
       }
 
       try {
-        // Voice-optimized mobile bitrate (32 kbps)
-        recorderOptions.audioBitsPerSecond = 32000;
+        recorderOptions.audioBitsPerSecond = 32000; // 32 kbps voice-optimized bitrate
         recorder = new MediaRecorder(stream, recorderOptions);
       } catch {
-        // Fallback without bitrate constraint if browser objects
+        // Fallback without bitrate constraint if browser engine objects
         try {
-          recorder = supportedMimeType
-            ? new MediaRecorder(stream, { mimeType: supportedMimeType })
+          recorder = selectedMime
+            ? new MediaRecorder(stream, { mimeType: selectedMime })
             : new MediaRecorder(stream);
         } catch {
           recorder = new MediaRecorder(stream);
         }
       }
 
+      // Stream continuous chunks to ondataavailable
       recorder.ondataavailable = (event: BlobEvent) => {
         if (event.data && event.data.size > 0) {
           chunksRef.current.push(event.data);
@@ -221,7 +219,10 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
       };
 
       recorder.onstop = () => {
-        // 4. Zero-byte buffer check
+        // Hardware cleanup: Stop all audio tracks immediately
+        stopStreamTracks();
+
+        // Check if any chunks were accumulated
         if (chunksRef.current.length === 0) {
           setErrorMessage(
             language === 'hi'
@@ -231,8 +232,9 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
           return;
         }
 
-        const finalBlob = supportedMimeType
-          ? new Blob(chunksRef.current, { type: supportedMimeType })
+        // Concatenate all recorded chunks into a single Blob
+        const finalBlob = selectedMime
+          ? new Blob(chunksRef.current, { type: selectedMime })
           : new Blob(chunksRef.current);
 
         if (finalBlob.size === 0) {
@@ -254,12 +256,12 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
         setAudioUrl(newUrl);
         setAudioBlob(finalBlob);
 
-        // Notify parent with verified binary Blob and duration
+        // Notify parent with verified single binary Blob and duration
         onAudioRecorded(finalBlob, durationRef.current);
       };
 
       recorder.onerror = (ev) => {
-        console.error('[AudioRecorder] MediaRecorder runtime error:', ev);
+        console.error('[AudioVoiceRecorder] MediaRecorder runtime error:', ev);
         stopRecording();
         setErrorMessage(
           language === 'hi'
@@ -269,7 +271,9 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
       };
 
       mediaRecorderRef.current = recorder;
-      recorder.start(250); // Slice chunks every 250ms for low memory latency
+
+      // Start recording with 250ms timeslice to stream chunks continuously without 0-byte truncation
+      recorder.start(250);
 
       setIsRecording(true);
       setDuration(0);
@@ -287,7 +291,7 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
         }
       }, 1000);
     } catch (err) {
-      console.error('[Audio Recorder] Microphone access failed:', err);
+      console.error('[AudioVoiceRecorder] Microphone access failed:', err);
       let msg =
         language === 'hi'
           ? 'माइक्रोफ़ोन अनुमति अस्वीकृत। कृपया माइक्रोफ़ोन सक्रिय करें।'
@@ -313,8 +317,13 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
     }
   };
 
-  // Clear audio and revoke Object URL
+  // Clear audio, stop tracks, and revoke Object URL
   const handleClear = () => {
+    if (isRecording) {
+      stopRecording();
+    }
+    stopStreamTracks();
+
     if (activeUrlRef.current && activeUrlRef.current.startsWith('blob:')) {
       URL.revokeObjectURL(activeUrlRef.current);
       activeUrlRef.current = null;
@@ -328,16 +337,28 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
     onAudioCleared();
   };
 
+  const selectedMimeLabel = probeSupportedMimeType() || 'Adaptive Audio';
+
   return (
-    <div className={`border border-slate-300 bg-slate-50 p-3 sm:p-4 rounded-none select-none ${className}`}>
-      {/* Insecure Context Warning */}
-      {!isSecureOrigin && (
-        <div className="mb-3 p-2.5 bg-amber-100 border-l-4 border-amber-600 text-amber-950 text-xs flex items-center gap-2">
-          <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0" />
-          <span>
-            {language === 'hi'
-              ? 'माइक्रोफ़ोन के लिए HTTPS या localhost सुरक्षित कनेक्शन आवश्यक है।'
-              : 'Microphone requires HTTPS or localhost.'}
+    <div
+      className={`border border-slate-300 bg-slate-50 p-3 sm:p-4 rounded-none select-none ${className}`}
+    >
+      {/* Secure Context Non-Blocking Diagnostic Toast */}
+      {!isSecure && (
+        <div
+          role="status"
+          className="mb-3 p-2.5 bg-amber-50 border-l-4 border-amber-600 text-amber-950 text-xs flex items-center justify-between gap-2 shadow-xs"
+        >
+          <div className="flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0" />
+            <span className="font-semibold">
+              {language === 'hi'
+                ? 'माइक्रोफ़ोन एक्सेस के लिए HTTPS या http://localhost आवश्यक है'
+                : 'Microphone access requires HTTPS or http://localhost'}
+            </span>
+          </div>
+          <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 bg-amber-200/60 text-amber-900 font-bold shrink-0">
+            Diagnostic Toast
           </span>
         </div>
       )}
@@ -397,7 +418,7 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
         <div className="space-y-3 bg-white border border-slate-300 p-3">
           {/* Spoken Confirmation Header */}
           <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-[#0B2545]">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-[#0F2537]">
               <Volume2 className="w-4 h-4 text-emerald-700" />
               <span>
                 {language === 'hi'
@@ -406,7 +427,8 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
               </span>
             </div>
             <span className="text-[10px] font-mono font-bold text-slate-500 bg-slate-100 px-1.5 py-0.5 border border-slate-200">
-              {formatTime(duration)} &bull; {audioBlob ? `${(audioBlob.size / 1024).toFixed(1)} KB` : '32 kbps'}
+              {formatTime(duration)} &bull;{' '}
+              {audioBlob ? `${(audioBlob.size / 1024).toFixed(1)} KB` : '32 kbps'}
             </span>
           </div>
 
@@ -437,8 +459,8 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
                 <button
                   type="button"
                   onClick={startRecording}
-                  disabled={!isSecureOrigin}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#0B2545] hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-bold uppercase rounded-none transition-colors cursor-pointer"
+                  disabled={!isSecure}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#0F2537] hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-bold uppercase rounded-none transition-colors cursor-pointer"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                   <span>
@@ -458,7 +480,9 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
             ) : (
               <div className="w-full flex items-center justify-between bg-red-50 border border-red-300 p-1.5">
                 <span className="text-[11px] text-red-900 font-bold">
-                  {language === 'hi' ? 'क्या आप रिकॉर्डिंग हटाना चाहते हैं?' : 'Delete recording?'}
+                  {language === 'hi'
+                    ? 'क्या आप रिकॉर्डिंग हटाना चाहते हैं?'
+                    : 'Delete recording?'}
                 </span>
                 <div className="flex items-center gap-1.5">
                   <button
@@ -490,7 +514,7 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
           <button
             type="button"
             onClick={startRecording}
-            disabled={!isSecureOrigin}
+            disabled={!isSecure}
             className="w-full py-3 px-4 bg-[#7A1B1B] hover:bg-[#631515] active:bg-[#521111] disabled:opacity-50 text-[#F8E7A2] text-xs sm:text-sm font-bold uppercase tracking-wider rounded-none shadow-xs border border-amber-900 flex items-center justify-center gap-2.5 transition-all cursor-pointer group"
           >
             <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center group-hover:bg-white/20 transition-colors">
@@ -514,16 +538,16 @@ export const AudioVoiceRecorder: React.FC<AudioVoiceRecorderProps> = ({
           <div className="flex items-center justify-between text-[11px] text-slate-500 bg-white border border-slate-200 px-2.5 py-1.5 font-mono">
             <div className="flex items-center gap-1.5 text-slate-700 font-medium">
               <Radio className="w-3.5 h-3.5 text-emerald-700" />
-              <span>Codec: {resolveSupportedMimeType() || 'Adaptive Audio'}</span>
+              <span>Codec: {selectedMimeLabel}</span>
             </div>
-            <span>32 kbps &bull; Max 60s</span>
+            <span>32 kbps &bull; Streaming 250ms &bull; Max 60s</span>
           </div>
         </div>
       )}
 
-      {/* Error Message */}
+      {/* Error Notice */}
       {errorMessage && (
-        <div className="mt-2 p-2 bg-red-100 border border-red-300 text-red-900 text-xs font-semibold flex items-center gap-1.5">
+        <div className="mt-2.5 p-2 bg-red-100 border border-red-300 text-red-900 text-xs font-semibold flex items-center gap-1.5">
           <AlertCircle className="w-3.5 h-3.5 text-red-700 shrink-0" />
           <span>{errorMessage}</span>
         </div>

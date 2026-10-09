@@ -30,6 +30,8 @@ export interface IssueForBoundaryGeneration {
   severity: string;
 }
 
+export type ProblemBriefInput = IssueForBoundaryGeneration;
+
 /**
  * Keyword classification taxonomy for Jharkhand grassroots engineering challenges
  */

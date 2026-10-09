@@ -194,7 +194,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
   // Tier 1 form states
   const [tier1HOD, setTier1HOD] = useState<string>(
     initialValidation.tier1HODName ||
-      (session.role === 'FACULTY_MENTOR'
+      (session.role === 'FACULTY_MENTOR' && session.fullName
         ? session.fullName
         : 'Dr. Arvind Kumar (Associate Professor, NIT Jamshedpur)')
   );
@@ -207,7 +207,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
 
   // Auto-sync HOD name when switching to Faculty Mentor
   useEffect(() => {
-    if (session.role === 'FACULTY_MENTOR' && !initialValidation.tier1HODName) {
+    if (session.role === 'FACULTY_MENTOR' && !initialValidation.tier1HODName && session.fullName) {
       setTier1HOD(session.fullName);
     }
   }, [session.role, session.fullName, initialValidation.tier1HODName]);
