@@ -66,7 +66,8 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
 }) => {
   // Session & RBAC Verification
   const { session, openVerificationModal, isVerified } = useSession();
-  const isAuthorizedOfficer = session.role === 'PANCHAYAT_OFFICER' && (session.isVerified ?? isVerified);
+  const isAuthorizedOfficer =
+    session?.role === 'PANCHAYAT_OFFICER' && (session?.isVerified ?? isVerified);
 
   // Form input states
   const [severity, setSeverity] = useState<SeverityLevel>(submission.severity || 'MEDIUM');
@@ -77,8 +78,8 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
     submission.panchayatInspectionNotes || ''
   );
   const [inspectorId, setInspectorId] = useState<string>(
-    session.role === 'PANCHAYAT_OFFICER'
-      ? session.maskedIdentifier
+    session?.role === 'PANCHAYAT_OFFICER'
+      ? session?.maskedIdentifier
       : submission.panchayatInspectorId || 'JH-BDO-RNC-04'
   );
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -88,10 +89,10 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
 
   // Sync inspectorId when session role switches to Panchayat Officer
   useEffect(() => {
-    if (session.role === 'PANCHAYAT_OFFICER') {
-      setInspectorId(session.maskedIdentifier);
+    if (session?.role === 'PANCHAYAT_OFFICER') {
+      setInspectorId(session?.maskedIdentifier ?? 'JH-BDO-RNC-04');
     }
-  }, [session.role, session.maskedIdentifier]);
+  }, [session?.role, session?.maskedIdentifier]);
 
   // Local object URL for photo evidence with auto cleanup
   const [photoPreview, setPhotoPreview] = useState<string | null>(
@@ -169,8 +170,8 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
     try {
       setIsSubmitting(true);
       const activeInspectorId =
-        session.role === 'PANCHAYAT_OFFICER'
-          ? session.maskedIdentifier
+        session?.role === 'PANCHAYAT_OFFICER'
+          ? session?.maskedIdentifier
           : inspectorId.trim() || 'Panchayat #JH-BDO-12';
 
       // 1. Transition record to ENDORSED_MASTER in IndexedDB
@@ -249,8 +250,8 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
     try {
       setIsSubmitting(true);
       const activeInspectorId =
-        session.role === 'PANCHAYAT_OFFICER'
-          ? session.maskedIdentifier
+        session?.role === 'PANCHAYAT_OFFICER'
+          ? session?.maskedIdentifier
           : inspectorId.trim() || 'Panchayat #JH-BDO-12';
       const cleanReason = rejectReason.trim() || 'Non-actionable / out of territorial scope';
 
@@ -289,6 +290,9 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
       setIsSubmitting(false);
     }
   };
+
+  // Session guard — modal is only rendered inside the authenticated shell.
+  if (!session) return null;
 
   return (
     <div

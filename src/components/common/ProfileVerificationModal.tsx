@@ -11,7 +11,7 @@
 import React, { useState } from 'react';
 import { useSession } from '../../context/SessionContext';
 import { UserRole } from '../../types/ingestion';
-import { ROLE_CREDENTIAL_METADATA, BASELINE_UNVERIFIED_SESSIONS } from '../../types/session';
+import { ROLE_CREDENTIAL_METADATA, BASELINE_UNVERIFIED_SESSIONS, PRESET_USER_SESSIONS } from '../../types/session';
 import { centralSyncService } from '../../services/centralSyncService';
 import {
   ShieldCheck,
@@ -97,6 +97,10 @@ export const ProfileVerificationModal: React.FC<ProfileVerificationModalProps> =
   const [pairingCode] = useState<string>(() => centralSyncService.generatePairingCode());
 
   if (!isOpen) return null;
+
+  // Display fallback for logged-out contexts (e.g. the login page's
+  // official-key entry point, where no session exists yet).
+  const displaySession = session ?? PRESET_USER_SESSIONS['CITIZEN'];
 
   const handleVerifySubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -231,26 +235,16 @@ export const ProfileVerificationModal: React.FC<ProfileVerificationModalProps> =
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-extrabold text-sm text-slate-900">{session.fullName || 'Registered Stakeholder'}</span>
-                <span
-                  className={`border px-1.5 py-0.2 text-[10px] font-mono font-bold flex items-center gap-1 ${
-                    session.isVerified
-                      ? 'bg-emerald-100 text-emerald-900 border-emerald-400'
-                      : 'bg-amber-100 text-amber-900 border-amber-400'
-                  }`}
-                >
-                  {session.isVerified ? (
-                    <Check className="w-3 h-3 text-emerald-700" />
-                  ) : (
-                    <Lock className="w-3 h-3 text-amber-700" />
-                  )}
-                  <span>{session.isVerified ? session.verificationBadge || 'VERIFIED ✓' : 'UNVERIFIED'}</span>
+                <span className="font-extrabold text-sm text-slate-900">{displaySession.fullName}</span>
+                <span className="bg-emerald-100 text-emerald-900 border border-emerald-400 px-1.5 py-0.2 text-[10px] font-mono font-bold flex items-center gap-1">
+                  <Check className="w-3 h-3 text-emerald-700" />
+                  <span>{displaySession.verificationBadge || 'VERIFIED'}</span>
                 </span>
               </div>
               <div className="text-xs text-slate-600 font-mono flex items-center gap-2 mt-0.5">
-                <span className="font-bold text-[#7A1B1B]">{session.maskedIdentifier}</span>
+                <span className="font-bold text-[#7A1B1B]">{displaySession.maskedIdentifier}</span>
                 <span>&bull;</span>
-                <span className="truncate max-w-xs">{session.institutionOrOrg || session.institutionOrPanchayat || 'Jharkhand Node'}</span>
+                <span>{displaySession.institutionOrPanchayat}</span>
               </div>
               {session.isVerified && session.sessionSignature && (
                 <div className="text-[10px] text-emerald-800 font-mono mt-0.5 flex items-center gap-1">
@@ -266,7 +260,7 @@ export const ProfileVerificationModal: React.FC<ProfileVerificationModalProps> =
           <div className="text-right">
             <div className="text-[10px] uppercase font-bold text-slate-500">Active Authority Role</div>
             <span className="bg-[#7A1B1B] text-white px-2 py-0.5 text-xs font-black uppercase tracking-wider inline-block mt-0.5">
-              {session.role.replace('_', ' ')}
+              {displaySession.role.replace('_', ' ')}
             </span>
           </div>
         </div>
@@ -412,10 +406,9 @@ export const ProfileVerificationModal: React.FC<ProfileVerificationModalProps> =
               Select one of the Quadruple-Helix Personas. Administrative actions will require authentic credential verification:
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {(Object.keys(BASELINE_UNVERIFIED_SESSIONS) as UserRole[]).map((r) => {
-                const profile = BASELINE_UNVERIFIED_SESSIONS[r];
-                const meta = ROLE_CREDENTIAL_METADATA[r];
-                const isCurrent = session.role === r;
+              {(Object.keys(PRESET_USER_SESSIONS) as UserRole[]).map((r) => {
+                const profile = PRESET_USER_SESSIONS[r];
+                const isCurrent = displaySession.role === r;
                 return (
                   <button
                     key={r}

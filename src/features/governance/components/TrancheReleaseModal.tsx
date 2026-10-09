@@ -97,7 +97,7 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
     }
   }, [initialTranche]);
 
-  if (!isOpen) return null;
+  if (!isOpen || !session) return null;
 
   // RBAC Capability Evaluation via verified SessionContext
   const isVerified = session.isVerified;

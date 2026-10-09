@@ -186,16 +186,21 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
   const [currentVal, setCurrentVal] = useState<SafetyValidation>(initialValidation);
 
   // RBAC Role checks
-  const isFacultyMentor = session.role === 'FACULTY_MENTOR' && (session.isVerified ?? isVerified);
+  const isFacultyMentor = session?.role === 'FACULTY_MENTOR' && (session?.isVerified ?? isVerified);
   const isEvaluatorOrGovt =
-    (session.role === 'ACCREDITED_EVALUATOR' || session.role === 'GOVT_ADMIN') &&
-    (session.isVerified ?? isVerified);
+    (session?.role === 'ACCREDITED_EVALUATOR' || session?.role === 'GOVT_ADMIN') &&
+    (session?.isVerified ?? isVerified);
 
   // Tier 1 form states
   const [tier1HOD, setTier1HOD] = useState<string>(
     initialValidation.tier1HODName ||
+<<<<<<< HEAD
       (session.role === 'FACULTY_MENTOR' && session.fullName
         ? session.fullName
+=======
+      (session?.role === 'FACULTY_MENTOR'
+        ? session?.fullName
+>>>>>>> 98e16bb (fixed speech-to-text and login workflow)
         : 'Dr. Arvind Kumar (Associate Professor, NIT Jamshedpur)')
   );
   const [tier1Url, setTier1Url] = useState<string>(
@@ -207,10 +212,15 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
 
   // Auto-sync HOD name when switching to Faculty Mentor
   useEffect(() => {
+<<<<<<< HEAD
     if (session.role === 'FACULTY_MENTOR' && !initialValidation.tier1HODName && session.fullName) {
       setTier1HOD(session.fullName);
+=======
+    if (session?.role === 'FACULTY_MENTOR' && !initialValidation.tier1HODName) {
+      setTier1HOD(session?.fullName ?? '');
+>>>>>>> 98e16bb (fixed speech-to-text and login workflow)
     }
-  }, [session.role, session.fullName, initialValidation.tier1HODName]);
+  }, [session?.role, session?.fullName, initialValidation.tier1HODName]);
 
   // Tier 2 form states
   const [evaluatorAgency, setEvaluatorAgency] = useState<Tier2EvaluatorAgency>(
@@ -226,7 +236,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
   const [isCertifyingTier2, setIsCertifyingTier2] = useState(false);
   const [tier2Message, setTier2Message] = useState<string | null>(null);
 
-  if (!isOpen) return null;
+  if (!isOpen || !session) return null;
 
   // Handle Faculty Sign-off on Tier 1
   const handleSignTier1 = async () => {
