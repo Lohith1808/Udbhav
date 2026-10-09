@@ -186,7 +186,19 @@ class CentralSyncService {
       const stored = window.localStorage.getItem('udbhav_user_session');
       if (stored) {
         try {
-          activeSession = JSON.parse(stored);
+          const parsed: unknown = JSON.parse(stored);
+          if (parsed && typeof parsed === 'object') {
+            // New format: { session, isAuthenticated }; legacy format: bare UserSession.
+            const maybeNew = parsed as { session?: UserSession };
+            if (maybeNew.session && maybeNew.session.userId) {
+              activeSession = maybeNew.session;
+            } else {
+              const maybeLegacy = parsed as UserSession;
+              if (maybeLegacy.userId) {
+                activeSession = maybeLegacy;
+              }
+            }
+          }
         } catch {
           // ignore
         }

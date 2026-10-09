@@ -1,13 +1,16 @@
 /**
  * Project Udbhav (SIH PS ID: 26043 — DHTE Jharkhand)
  * Official Government of Jharkhand / NIC / GIGW 3.0 Standard Header
- * 
+ *
  * Features:
  * - 32px Deep Navy Accessibility Strip with live IST timestamp & High Contrast toggle
  * - 3.5px Indian Tricolor sub-border
  * - Institutional Emblem Masthead with official State Seal & Stamp Box for OfflineQueueBadge
  * - Deep Administrative Maroon (#7A1B1B) & Gold (#F8E7A2) Civic Navbar
+ *   (role-filtered: only the signed-in stakeholder's permitted workspace
+ *   routes are rendered — driven by src/config/roleRoutes.ts)
  * - Government Marquee / Live Ticker Bulletin
+ * - Current-user identity stamp with logout control
  */
 
 import React, { useState, useEffect } from 'react';
@@ -20,9 +23,17 @@ import {
   ShieldCheck,
   Building,
   UserCheck,
+  //Sparkles,
+  LogOut,
   Cpu,
 } from 'lucide-react';
 import { checkOllamaActive, getOllamaModel } from '../../services/aiService';
+
+export interface GovtHeaderNavItem {
+  id: string;
+  labelEn: string;
+  labelHi: string;
+}
 
 export interface GovtHeaderProps {
   language: 'hi' | 'en';
@@ -31,11 +42,15 @@ export interface GovtHeaderProps {
   onFontSizeChange: (size: 'sm' | 'md' | 'lg') => void;
   highContrast: boolean;
   onHighContrastToggle: () => void;
-  activeNavTab?: string;
-  onNavTabChange?: (tab: string) => void;
+  /** Role-filtered navigation items (only permitted workspace routes). */
+  navItems: GovtHeaderNavItem[];
+  /** The currently active workspace route id. */
+  activeViewId: string;
+  onNavigate: (viewId: string) => void;
   isSyncing?: boolean;
   onSyncTrigger?: () => Promise<void> | void;
   onOpenAiSettings?: () => void;
+  onLogout?: () => void;
 }
 
 export const GovtHeader: React.FC<GovtHeaderProps> = ({
@@ -45,13 +60,16 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
   onFontSizeChange,
   highContrast,
   onHighContrastToggle,
-  activeNavTab = 'report',
-  onNavTabChange,
+  navItems,
+  activeViewId,
+  onNavigate,
   isSyncing,
   onSyncTrigger,
   onOpenAiSettings,
+  onLogout,
 }) => {
   const { session, openVerificationModal } = useSession();
+
   // Live IST Timestamp formatter
   const [currentIST, setCurrentIST] = useState<string>('');
   const [isOllamaLive, setIsOllamaLive] = useState<boolean>(false);
@@ -98,14 +116,8 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
     return () => clearInterval(interval);
   }, []);
 
-  const navItems = [
-    { id: 'home', labelHi: 'मुख्य पृष्ठ', labelEn: 'Home' },
-    { id: 'report', labelHi: 'समस्या दर्ज करें', labelEn: 'Report Citizen Issue' },
-    { id: 'panchayat', labelHi: 'पंचायत सत्यापन', labelEn: 'Panchayat Verification' },
-    { id: 'academic', labelHi: 'विश्वविद्यालय नवाचार', labelEn: 'Academic Solvers' },
-    { id: 'csr', labelHi: 'उद्योग एवं सीएसआर', labelEn: 'Industry CSR' },
-    { id: 'gis', labelHi: 'डैशबोर्ड / जीआईएस', labelEn: 'GIS Heatmap' },
-  ];
+  // Header is only rendered inside the authenticated shell; guard anyway.
+  if (!session) return null;
 
   return (
     <header className="w-full bg-white select-none z-50">
@@ -167,7 +179,7 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
               </button>
             </div>
 
-            <span className="text-slate-700 hidden md:inline" aria-hidden="true">
+            <span className="text-slate-700 hidden sm:inline" aria-hidden="true">
               |
             </span>
 
@@ -353,6 +365,19 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
               </div>
             </button>
 
+            {/* Logout control */}
+            {onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 border border-slate-300 bg-white hover:bg-red-50 hover:border-red-300 hover:text-red-700 text-slate-700 text-[11px] font-bold uppercase rounded-none transition-colors cursor-pointer"
+                title="Sign out / साइन आउट"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Logout</span>
+              </button>
+            )}
+
             {/* Official Stamp Box for OfflineQueueBadge */}
             <div
               className="border-2 border-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-none shadow-2xs flex items-center gap-2"
@@ -376,7 +401,7 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
       </div>
 
       {/* ============================================================== */}
-      {/* 3. DEEP MAROON & GOLD PRIMARY CIVIC NAVBAR */}
+      {/* 3. DEEP MAROON & GOLD PRIMARY CIVIC NAVBAR (role-filtered) */}
       {/* ============================================================== */}
       <nav
         className="bg-[#7A1B1B] text-[#F8E7A2] border-y border-amber-900/60 shadow-xs"
@@ -385,12 +410,12 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
         <div className="max-w-7xl mx-auto px-4 sm:px-6">
           <div className="flex items-center overflow-x-auto scrollbar-none gap-0.5">
             {navItems.map((item) => {
-              const isActive = activeNavTab === item.id;
+              const isActive = activeViewId === item.id;
               return (
                 <button
                   key={item.id}
                   type="button"
-                  onClick={() => onNavTabChange && onNavTabChange(item.id)}
+                  onClick={() => onNavigate(item.id)}
                   className={`px-3.5 py-2.5 text-xs font-bold uppercase tracking-wider whitespace-nowrap transition-colors rounded-none flex items-center gap-1.5 border-b-3 ${
                     isActive
                       ? 'bg-[#5F1414] text-white border-[#F8E7A2] shadow-inner'
@@ -413,7 +438,7 @@ export const GovtHeader: React.FC<GovtHeaderProps> = ({
       <div className="bg-amber-50 border-b border-amber-300 text-slate-900 text-xs flex items-stretch overflow-hidden">
         {/* Red Latest Updates Stamp */}
         <div className="bg-red-700 text-white font-extrabold text-[11px] uppercase tracking-wider px-3.5 py-1.5 flex items-center gap-1 shrink-0 z-10 shadow-xs">
-          <span className="w-2 h-2 rounded-full bg-white animate-ping mr-1" />
+          <span className="w-2 h-2 rounded-full bg-white animate-ping mr-1" aria-hidden="true" />
           <span>{language === 'hi' ? 'महत्वपूर्ण सूचना' : 'LATEST UPDATES'}</span>
         </div>
 
