@@ -32,6 +32,13 @@ import {
   EscrowStatus,
   Tier2EvaluatorAgency,
 } from '../types/governance';
+import {
+  evaluateClusterAssignment,
+  resolveHighestSeverity,
+  type ClusterEvaluationResult,
+} from '../utils/intensityScorer';
+
+export type { ClusterEvaluationResult };
 
 /**
  * Custom error classes for fine-grained client-side storage diagnostics
@@ -186,6 +193,91 @@ export async function saveDraft(draft: OfflineDraftSubmission): Promise<string> 
 }
 
 /**
+ * Sprint 6 - Task 6.3: Cross-Device Spatial Clustering & Distributed Ingestion
+ * Evaluates spatial proximity (<=1000m or LGD panchayatCode match) and phoneHash deduplication.
+ * - Same phoneHash: flag duplicate notification, prevent score inflation.
+ * - Distinct citizen within radius: merge into Master Issue, increment intensityScore, preserve highest severity.
+ * - Isolated: saves as new primary master record.
+ */
+export async function clusterAndSaveSubmission(
+  submission: OfflineDraftSubmission
+): Promise<ClusterEvaluationResult> {
+  try {
+    validateDraftPayload(submission);
+
+    const existingDrafts = await db.draftSubmissions.toArray();
+    const evaluation = evaluateClusterAssignment(submission, existingDrafts);
+
+    if (evaluation.isDirectUserDuplicate) {
+      // Repeat submission from the same citizen: update missing media if any, do not inflate score
+      if (evaluation.targetMasterIssueId) {
+        const master = await db.draftSubmissions.get(evaluation.targetMasterIssueId);
+        if (master) {
+          const mergedPhoto = master.photoBlob || submission.photoBlob;
+          const mergedAudio = master.audioBlob || submission.audioBlob;
+          await db.draftSubmissions.update(master.id, {
+            photoBlob: mergedPhoto,
+            audioBlob: mergedAudio,
+            timestamp: Date.now(),
+          });
+        }
+      }
+      return evaluation;
+    }
+
+    if (evaluation.shouldMergeIntoMaster && evaluation.targetMasterIssueId) {
+      const master = await db.draftSubmissions.get(evaluation.targetMasterIssueId);
+      if (master) {
+        const targetIntensity = Math.max(
+          (master.intensityScore || 1) + 1,
+          evaluation.newIntensityScore
+        );
+        const resolvedSeverity = resolveHighestSeverity(master.severity, submission.severity);
+        const mergedPhoto = master.photoBlob || submission.photoBlob;
+        const mergedAudio = master.audioBlob || submission.audioBlob;
+
+        await db.draftSubmissions.update(master.id, {
+          intensityScore: targetIntensity,
+          severity: resolvedSeverity,
+          photoBlob: mergedPhoto,
+          audioBlob: mergedAudio,
+          timestamp: Date.now(),
+          aiTriageCategory: master.aiTriageCategory || submission.aiTriageCategory,
+        });
+
+        // Also persist incoming submission referencing the Master Issue for auditability
+        const clusteredRecord: OfflineDraftSubmission = {
+          ...submission,
+          intensityScore: targetIntensity,
+          remoteMasterIssueId: master.id,
+          status: master.status,
+          masterLifecycleStatus: master.masterLifecycleStatus,
+          timestamp: submission.timestamp || Date.now(),
+        };
+        await db.draftSubmissions.put(clusteredRecord);
+
+        return {
+          ...evaluation,
+          newIntensityScore: targetIntensity,
+        };
+      }
+    }
+
+    // Isolated new incident
+    const sanitizedDraft: OfflineDraftSubmission = {
+      ...submission,
+      intensityScore: submission.intensityScore ?? 1,
+      timestamp: submission.timestamp || Date.now(),
+    };
+    await db.draftSubmissions.put(sanitizedDraft);
+
+    return evaluation;
+  } catch (error) {
+    return handleStorageError(error, 'clusterAndSaveSubmission');
+  }
+}
+
+/**
  * Retrieves all submissions currently marked as QUEUED for remote synchronization,
  * ordered chronologically (FIFO).
  */
@@ -203,12 +295,18 @@ export async function getQueuedSubmissions(): Promise<OfflineDraftSubmission[]> 
 /**
  * Marks a queued draft submission as successfully synced to the central PostgreSQL registry.
  */
-export async function markAsSynced(id: string, remoteMasterIssueId: string): Promise<void> {
+export async function markAsSynced(
+  id: string,
+  remoteMasterIssueId: string,
+  remoteRevision?: number
+): Promise<void> {
   try {
     const updatedCount = await db.draftSubmissions.update(id, {
       syncStatus: 'SYNCED',
       remoteMasterIssueId,
       lastSyncAttempt: Date.now(),
+      lastSyncedAt: new Date().toISOString(),
+      remoteRevision: remoteRevision ?? 1,
       syncErrorMessage: undefined,
     });
 
@@ -217,6 +315,130 @@ export async function markAsSynced(id: string, remoteMasterIssueId: string): Pro
     }
   } catch (error) {
     return handleStorageError(error, 'markAsSynced');
+  }
+}
+
+/**
+ * Batch upserts remote issues into local IndexedDB with queue protection,
+ * conflict resolution, and spatial cluster assignment (Sprint 6 - Task 6.3).
+ * - Prevents data loss by never overwriting local offline drafts marked as 'QUEUED'.
+ * - Applies timestamp-based "Last-Write-Wins" on immutable/status fields.
+ * - Enforces monotonic counter increments for intensityScore (Math.max).
+ * - Runs evaluateClusterAssignment on incoming remote issues to avoid split clusters across nodes.
+ */
+export async function upsertRemoteIssues(issues: OfflineDraftSubmission[]): Promise<void> {
+  if (!issues || issues.length === 0) return;
+
+  try {
+    await db.transaction('rw', db.draftSubmissions, async () => {
+      for (const remote of issues) {
+        if (!remote.id) continue;
+        const local = await db.draftSubmissions.get(remote.id);
+
+        if (local) {
+          // Guardrail: DO NOT overwrite local offline drafts marked as QUEUED
+          if (local.syncStatus === 'QUEUED') {
+            const maxIntensity = Math.max(local.intensityScore || 1, remote.intensityScore || 1);
+            if (maxIntensity !== local.intensityScore) {
+              await db.draftSubmissions.update(local.id, {
+                intensityScore: maxIntensity,
+              });
+            }
+            continue;
+          }
+
+          // Conflict Resolution: Last-Write-Wins based on latest timestamp
+          const localTs = Math.max(local.panchayatEndorsedAt || 0, local.timestamp || 0);
+          const remoteTs = Math.max(remote.panchayatEndorsedAt || 0, remote.timestamp || 0);
+          const maxIntensity = Math.max(local.intensityScore || 1, remote.intensityScore || 1);
+          const resolvedSeverity = resolveHighestSeverity(local.severity, remote.severity);
+
+          if (remoteTs >= localTs) {
+            await db.draftSubmissions.put({
+              ...local,
+              ...remote,
+              // Retain local binary blobs if remote payload stripped them
+              photoBlob: remote.photoBlob || local.photoBlob,
+              audioBlob: remote.audioBlob || local.audioBlob,
+              intensityScore: maxIntensity,
+              severity: resolvedSeverity,
+              syncStatus: 'SYNCED',
+              lastSyncedAt: remote.lastSyncedAt || new Date().toISOString(),
+              remoteRevision: remote.remoteRevision ?? (local.remoteRevision ?? 0) + 1,
+            });
+          } else {
+            // Local is newer: preserve local state, monotonic intensity score update
+            await db.draftSubmissions.update(local.id, {
+              intensityScore: maxIntensity,
+              severity: resolvedSeverity,
+              lastSyncedAt: new Date().toISOString(),
+            });
+          }
+        } else {
+          // New remote record: evaluate clustering against existing local records
+          const currentLocalList = await db.draftSubmissions.toArray();
+          const clusterEval = evaluateClusterAssignment(remote, currentLocalList);
+
+          if (clusterEval.isDirectUserDuplicate && clusterEval.targetMasterIssueId) {
+            // Repeat submission from the same citizen: update timestamp & retain evidence
+            const targetMaster = await db.draftSubmissions.get(clusterEval.targetMasterIssueId);
+            if (targetMaster) {
+              await db.draftSubmissions.update(targetMaster.id, {
+                photoBlob: targetMaster.photoBlob || remote.photoBlob,
+                audioBlob: targetMaster.audioBlob || remote.audioBlob,
+                lastSyncedAt: new Date().toISOString(),
+              });
+            }
+            await db.draftSubmissions.put({
+              ...remote,
+              remoteMasterIssueId: clusterEval.targetMasterIssueId,
+              syncStatus: 'SYNCED',
+              intensityScore: targetMaster?.intensityScore || 1,
+              lastSyncedAt: remote.lastSyncedAt || new Date().toISOString(),
+              remoteRevision: remote.remoteRevision ?? 1,
+            });
+          } else if (clusterEval.shouldMergeIntoMaster && clusterEval.targetMasterIssueId) {
+            // Distinct citizen spatial cluster: elevate master issue score and severity
+            const targetMaster = await db.draftSubmissions.get(clusterEval.targetMasterIssueId);
+            if (targetMaster) {
+              const updatedScore = Math.max(
+                (targetMaster.intensityScore || 1) + 1,
+                clusterEval.newIntensityScore,
+                remote.intensityScore || 1
+              );
+              const resolvedSeverity = resolveHighestSeverity(targetMaster.severity, remote.severity);
+
+              await db.draftSubmissions.update(targetMaster.id, {
+                intensityScore: updatedScore,
+                severity: resolvedSeverity,
+                photoBlob: targetMaster.photoBlob || remote.photoBlob,
+                audioBlob: targetMaster.audioBlob || remote.audioBlob,
+                lastSyncedAt: new Date().toISOString(),
+              });
+            }
+            await db.draftSubmissions.put({
+              ...remote,
+              remoteMasterIssueId: clusterEval.targetMasterIssueId,
+              syncStatus: 'SYNCED',
+              intensityScore: clusterEval.newIntensityScore,
+              lastSyncedAt: remote.lastSyncedAt || new Date().toISOString(),
+              remoteRevision: remote.remoteRevision ?? 1,
+            });
+          } else {
+            // Isolated incident: insert safely
+            await db.draftSubmissions.put({
+              ...remote,
+              syncStatus: 'SYNCED',
+              intensityScore: remote.intensityScore || 1,
+              lastSyncedAt: remote.lastSyncedAt || new Date().toISOString(),
+              remoteRevision: remote.remoteRevision ?? 1,
+            });
+          }
+        }
+      }
+    });
+  } catch (error) {
+    return handleStorageError(error, 'upsertRemoteIssues');
   }
 }
 
@@ -329,6 +551,20 @@ export async function endorseSubmission(
     if (trimmedNotes.length < 20) {
       throw new Error(
         'Anti-Rubber-Stamp Violation: Mandatory field inspection note must be at least 20 characters long.'
+      );
+    }
+    // Anti-Gibberish: reject repeated single-character sequences
+    if (/(.)\1{3,}/i.test(trimmedNotes)) {
+      throw new Error(
+        'Anti-Rubber-Stamp Violation: Repeated character sequences rejected. Please provide a substantive field inspection note.'
+      );
+    }
+    // Require at least 3 distinct words separated by spaces
+    const words = trimmedNotes.split(/\s+/).filter((w) => w.length > 0);
+    const distinctWords = new Set(words.map((w) => w.toLowerCase()));
+    if (words.length < 3 || distinctWords.size < 3) {
+      throw new Error(
+        'Anti-Rubber-Stamp Violation: Field inspection note must contain at least 3 distinct words.'
       );
     }
     if (!affectedHouseholds || affectedHouseholds < 1) {
@@ -890,11 +1126,20 @@ export async function assignMentorToTeam(
  */
 export async function approveTeamMentorship(
   teamId: string,
-  mentorId: string
+  mentorId?: string
 ): Promise<{ success: boolean; message: string }> {
   try {
     return await db.transaction('rw', db.studentTeams, db.facultyMentors, async () => {
-      const mentor = await db.facultyMentors.get(mentorId);
+      const team = await db.studentTeams.get(teamId);
+      if (!team) {
+        return { success: false, message: 'Student team not found.' };
+      }
+      const targetMentorId = mentorId || team.assignedMentorId;
+      if (!targetMentorId) {
+        return { success: false, message: 'No mentor assigned to this proposal.' };
+      }
+
+      const mentor = await db.facultyMentors.get(targetMentorId);
       if (!mentor) {
         return { success: false, message: 'Faculty mentor not found.' };
       }
@@ -905,14 +1150,14 @@ export async function approveTeamMentorship(
         };
       }
 
-      await db.facultyMentors.update(mentorId, {
+      await db.facultyMentors.update(targetMentorId, {
         activeProjectsCount: mentor.activeProjectsCount + 1,
         pendingReviewQueueCount: Math.max(0, mentor.pendingReviewQueueCount - 1),
       });
 
       await db.studentTeams.update(teamId, {
         mentorStatus: 'APPROVED',
-        assignedMentorId: mentorId,
+        assignedMentorId: targetMentorId,
       });
 
       return { success: true, message: 'Mentorship proposal successfully approved.' };
@@ -928,15 +1173,20 @@ export async function approveTeamMentorship(
  */
 export async function declineTeamMentorship(
   teamId: string,
-  mentorId: string
+  mentorId?: string,
+  reason?: string
 ): Promise<{ success: boolean; message: string }> {
   try {
     return await db.transaction('rw', db.studentTeams, db.facultyMentors, async () => {
-      const mentor = await db.facultyMentors.get(mentorId);
-      if (mentor) {
-        await db.facultyMentors.update(mentorId, {
-          pendingReviewQueueCount: Math.max(0, mentor.pendingReviewQueueCount - 1),
-        });
+      const team = await db.studentTeams.get(teamId);
+      const targetMentorId = mentorId || team?.assignedMentorId;
+      if (targetMentorId) {
+        const mentor = await db.facultyMentors.get(targetMentorId);
+        if (mentor) {
+          await db.facultyMentors.update(targetMentorId, {
+            pendingReviewQueueCount: Math.max(0, mentor.pendingReviewQueueCount - 1),
+          });
+        }
       }
 
       await db.studentTeams.update(teamId, {
@@ -944,10 +1194,94 @@ export async function declineTeamMentorship(
         assignedMentorId: undefined,
       });
 
-      return { success: true, message: 'Proposal declined and rerouted for alternate mentor selection.' };
+      return {
+        success: true,
+        message: reason
+          ? `Proposal declined (${reason}) and rerouted for alternate mentor selection.`
+          : 'Proposal declined and rerouted for alternate mentor selection.',
+      };
     });
   } catch (error) {
     return handleStorageError(error, 'declineTeamMentorship');
+  }
+}
+
+/**
+ * Automatically reroutes a stalled (7-day expired) student capstone proposal
+ * to an alternate accredited faculty member with available active and review queue capacity.
+ */
+export async function autoRerouteTeamMentorship(
+  teamId: string,
+  currentMentorId?: string,
+  preferredNextMentorId?: string
+): Promise<{ success: boolean; message: string; newMentorId?: string }> {
+  try {
+    return await db.transaction('rw', db.studentTeams, db.facultyMentors, async () => {
+      const team = await db.studentTeams.get(teamId);
+      if (!team) {
+        return { success: false, message: 'Student team not found.' };
+      }
+
+      const activeCurrentMentorId = currentMentorId || team.assignedMentorId;
+      if (activeCurrentMentorId) {
+        const currentMentor = await db.facultyMentors.get(activeCurrentMentorId);
+        if (currentMentor) {
+          await db.facultyMentors.update(activeCurrentMentorId, {
+            pendingReviewQueueCount: Math.max(0, currentMentor.pendingReviewQueueCount - 1),
+          });
+        }
+      }
+
+      // Find suitable alternative faculty mentor
+      let nextMentor: FacultyMentorProfile | undefined;
+      if (preferredNextMentorId && preferredNextMentorId !== activeCurrentMentorId) {
+        nextMentor = await db.facultyMentors.get(preferredNextMentorId);
+      }
+      if (
+        !nextMentor ||
+        nextMentor.activeProjectsCount >= FACULTY_MAX_ACTIVE_PROJECTS ||
+        nextMentor.pendingReviewQueueCount >= FACULTY_MAX_PENDING_QUEUE
+      ) {
+        const allMentors = await db.facultyMentors.toArray();
+        nextMentor = allMentors.find(
+          (m) =>
+            m.id !== activeCurrentMentorId &&
+            m.activeProjectsCount < FACULTY_MAX_ACTIVE_PROJECTS &&
+            m.pendingReviewQueueCount < FACULTY_MAX_PENDING_QUEUE
+        );
+      }
+
+      if (nextMentor) {
+        await db.facultyMentors.update(nextMentor.id, {
+          pendingReviewQueueCount: nextMentor.pendingReviewQueueCount + 1,
+        });
+
+        const rerouteTimestamp = Date.now();
+        await db.studentTeams.update(teamId, {
+          assignedMentorId: nextMentor.id,
+          mentorStatus: 'PENDING_APPROVAL',
+          mentorRequestTimestamp: rerouteTimestamp,
+        });
+
+        return {
+          success: true,
+          message: `Stalled proposal auto-rerouted to alternate mentor ${nextMentor.name} (${nextMentor.institution}).`,
+          newMentorId: nextMentor.id,
+        };
+      } else {
+        // No alternate mentor with available capacity; reset to REROUTED for open catalog selection
+        await db.studentTeams.update(teamId, {
+          assignedMentorId: undefined,
+          mentorStatus: 'REROUTED',
+        });
+        return {
+          success: true,
+          message: 'Proposal rerouted back to solver pool for manual re-assignment (all faculty currently at capacity).',
+        };
+      }
+    });
+  } catch (error) {
+    return handleStorageError(error, 'autoRerouteTeamMentorship');
   }
 }
 

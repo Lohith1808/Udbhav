@@ -18,6 +18,7 @@ import {
   X,
   School,
   Briefcase,
+  Lock,
 } from 'lucide-react';
 import {
   EngineeringProblemBrief,
@@ -26,6 +27,8 @@ import {
   AcademicDepartment,
 } from '../../../types/solver';
 import { createTeam, saveEngineeringBrief } from '../../../lib/db';
+import { useSession } from '../../../context/SessionContext';
+import { centralSyncService } from '../../../services/centralSyncService';
 
 export interface TeamAssemblyModalProps {
   brief: EngineeringProblemBrief;
@@ -60,11 +63,17 @@ export const TeamAssemblyModal: React.FC<TeamAssemblyModalProps> = ({
   onSuccess,
 }) => {
   const modalTitleId = useId();
+  const { session, openVerificationModal } = useSession();
+
+  // Enforce Verified Student Solver Role (Sprint 6 - Task 6.4)
+  const isSolverVerified = session.role === 'STUDENT_SOLVER' && session.isVerified === true;
 
   // Lead Student details
   const [teamName, setTeamName] = useState('');
-  const [leadName, setLeadName] = useState('');
-  const [leadCollege, setLeadCollege] = useState<string>(JHARKHAND_HEIS[0]);
+  const [leadName, setLeadName] = useState(session.fullName || '');
+  const [leadCollege, setLeadCollege] = useState<string>(
+    (session.institutionOrOrg as typeof JHARKHAND_HEIS[number]) || JHARKHAND_HEIS[0]
+  );
   const [leadDept, setLeadDept] = useState<AcademicDepartment>('CSE');
   const [leadYear, setLeadYear] = useState<number>(3);
   const [leadRole, setLeadRole] = useState('Team Lead & Systems Architect');
@@ -98,7 +107,12 @@ export const TeamAssemblyModal: React.FC<TeamAssemblyModalProps> = ({
       (m) => m.name.trim().length >= 2 && m.roleDescription.trim().length >= 2
     );
   const canSubmit =
-    isTeamNameValid && isLeadValid && arePeersValid && isMultidisciplinary && !isSubmitting;
+    isSolverVerified &&
+    isTeamNameValid &&
+    isLeadValid &&
+    arePeersValid &&
+    isMultidisciplinary &&
+    !isSubmitting;
 
   const handleAddMember = () => {
     if (peerMembers.length >= 3) return; // Max 4 total (lead + 3)
@@ -145,9 +159,13 @@ export const TeamAssemblyModal: React.FC<TeamAssemblyModalProps> = ({
       const generatedTeamId = `TEAM-JH-${Date.now().toString(36).toUpperCase()}-${Math.floor(
         100 + Math.random() * 900
       )}`;
-      const leadStudentId = `LEAD-${leadCollege.replace(/\s+/g, '')}-${Math.floor(
+      const fallbackLeadId = `LEAD-${leadCollege.replace(/\s+/g, '')}-${Math.floor(
         1000 + Math.random() * 9000
       )}`;
+      const leadStudentId =
+        isSolverVerified && session.maskedIdentifier
+          ? session.maskedIdentifier
+          : fallbackLeadId;
 
       const completeRoster: TeamMember[] = [
         {
@@ -180,9 +198,24 @@ export const TeamAssemblyModal: React.FC<TeamAssemblyModalProps> = ({
       await createTeam(newTeam);
 
       // 2. Transition brief status to 'CLAIMED'
-      await saveEngineeringBrief({
+      const updatedBrief: EngineeringProblemBrief = {
         ...brief,
         status: 'CLAIMED',
+      };
+      await saveEngineeringBrief(updatedBrief);
+
+      // 3. Publish lifecycle events across network (Sprint 6 - Task 6.4)
+      centralSyncService.publish('RECORD_UPDATED', {
+        type: 'brief',
+        id: brief.id,
+        briefId: brief.id,
+        status: 'CLAIMED',
+        brief: updatedBrief,
+      });
+
+      centralSyncService.publish('TEAM_CLAIMED', {
+        team: newTeam,
+        briefId: brief.id,
       });
 
       onSuccess(newTeam);
@@ -275,30 +308,58 @@ export const TeamAssemblyModal: React.FC<TeamAssemblyModalProps> = ({
             </div>
           )}
 
+          {/* RBAC Verification Gate Banner (Sprint 6 - Task 6.4) */}
+          {!isSolverVerified && (
+            <div className="p-3.5 bg-amber-50 border-2 border-amber-400 text-amber-950 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs">
+              <div className="flex items-start gap-2.5">
+                <Lock className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-black text-xs uppercase tracking-wide">
+                    {language === 'hi'
+                      ? 'सत्यापित छात्र अन्वेषक क्रेडेंशियल आवश्यक'
+                      : 'Verified Student Solver Role Required (RBAC Gate)'}
+                  </div>
+                  <div className="text-[11px] text-amber-900 mt-0.5">
+                    {language === 'hi'
+                      ? 'केवल सत्यापित छात्र दल (B.Tech Capstone Leads) ही राज्य कैपस्टोन चुनौती का दावा कर सकते हैं। परीक्षण टोकन: AICTE-STUDENT-JH-2026'
+                      : 'Under SIH PS ID 26043 governance, only verified collegiate Student Solvers can claim state capstone briefs. Enter institutional passkey in Profile Verification (e.g. AICTE-STUDENT-JH-2026).'}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={openVerificationModal}
+                className="px-3 py-1.5 bg-[#7A1B1B] hover:bg-[#601515] text-[#F8E7A2] text-xs font-bold uppercase shrink-0 transition-colors cursor-pointer shadow-xs"
+              >
+                {language === 'hi' ? 'आईडी सत्यापित करें' : 'Verify Solver ID'}
+              </button>
+            </div>
+          )}
+
           {/* NEP 2020 Multidisciplinary Criteria Indicator Pill */}
           <div
-            className={`p-3 border text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 shadow-2xs ${
+            className={`p-3 border-2 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 shadow-2xs ${
               isMultidisciplinary
                 ? 'bg-emerald-50 border-emerald-400 text-emerald-950'
-                : 'bg-amber-50 border-amber-400 text-amber-950'
+                : 'bg-red-50 border-red-500 text-red-950'
             }`}
           >
             <div className="flex items-center gap-2">
               {isMultidisciplinary ? (
                 <CheckCircle2 className="w-5 h-5 text-emerald-700 shrink-0" />
               ) : (
-                <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0" />
+                <AlertTriangle className="w-5 h-5 text-red-700 shrink-0" />
               )}
               <div>
                 <span className="font-black text-xs uppercase block">
                   {isMultidisciplinary
                     ? `NEP 2020 Multidisciplinary Criteria Satisfied (${allDepartments.length} Departments)`
-                    : 'Multidisciplinary Requirement Not Met'}
+                    : 'NEP 2020 Mandate: Teams must include members from at least 2 distinct engineering departments.'}
                 </span>
                 <span className="text-[11px] text-slate-700">
                   {isMultidisciplinary
                     ? `Departments represented: ${allDepartments.join(' + ')}`
-                    : 'Teams must feature cross-department collaboration (e.g., CSE + Civil or Mechanical).'}
+                    : 'Teams must bridge multiple engineering disciplines (e.g., CSE + Civil or Mechanical or Electrical).'}
                 </span>
               </div>
             </div>
@@ -591,9 +652,17 @@ export const TeamAssemblyModal: React.FC<TeamAssemblyModalProps> = ({
                     ? language === 'hi'
                       ? 'पंजीकरण जारी है...'
                       : 'Claiming Challenge...'
+                    : !isSolverVerified
+                    ? language === 'hi'
+                      ? 'छात्र सत्यापन आवश्यक (RBAC)'
+                      : 'Solver Verification Required'
+                    : !isMultidisciplinary
+                    ? language === 'hi'
+                      ? 'एनईपी 2020: 2 विभाग आवश्यक'
+                      : 'NEP 2020: 2 Departments Required'
                     : language === 'hi'
                     ? 'रोस्टर पुष्टि करें एवं दावा करें'
-                    : 'Confirm Roster & Claim Challenge'}
+                    : 'Submit Capstone Claim'}
                 </span>
               </button>
             </div>

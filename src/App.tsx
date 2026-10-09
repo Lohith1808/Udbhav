@@ -9,17 +9,16 @@ import React, { useState, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   db,
-  saveDraft,
+  clusterAndSaveSubmission,
   markAsSynced,
   deleteDraft,
   queueDraft,
   endorseSubmission,
   rejectSubmission,
-  getDraft,
   saveEngineeringBrief,
 } from './lib/db';
 import { generateProblemBoundaryBrief } from './features/solver';
-import { EngineeringProblemBrief, StudentTeam } from './types/solver';
+import { EngineeringProblemBrief, StudentTeam, FacultyMentorProfile, BriefStatus, PanchayatTechnicalQuery } from './types/solver';
 
 const ProblemBriefModal = React.lazy(
   () => import('./features/solver/components/ProblemBriefModal')
@@ -58,7 +57,6 @@ import { LiveCameraCapture } from './features/ingestion/components/LiveCameraCap
 import { LGDGeoTagger } from './features/ingestion/components/LGDGeoTagger';
 import { AudioVoiceRecorder } from './features/ingestion/components/AudioVoiceRecorder';
 import { initAutoSyncListener } from './utils/syncWorker';
-import { calculateIntensityScore } from './utils/intensityScorer';
 import { SessionProvider, useSession } from './context/SessionContext';
 import { generateLLMProblemBoundaryBrief } from './services/aiService';
 const ProfileVerificationModal = React.lazy(
@@ -269,6 +267,36 @@ const AppContent: React.FC = () => {
   const allBriefs = useLiveQuery(() => db.engineeringBriefs.toArray(), [], []);
   const allTeams = useLiveQuery(() => db.studentTeams.toArray(), [], []);
 
+  // Dedicated reactive live queries for Panchayat Verification Desk (Sprint 6 - Task 6.2)
+  const pendingDeskSubmissions = useLiveQuery(
+    () =>
+      db.draftSubmissions
+        .filter(
+          (s) =>
+            s.status === 'REPORTED' ||
+            s.status === 'AI_TRIAGED' ||
+            s.masterLifecycleStatus === 'REPORTED' ||
+            s.masterLifecycleStatus === 'AI_TRIAGED' ||
+            (!s.status && !s.masterLifecycleStatus)
+        )
+        .toArray(),
+    [],
+    []
+  );
+
+  const endorsedDeskSubmissions = useLiveQuery(
+    () =>
+      db.draftSubmissions
+        .filter(
+          (s) =>
+            s.status === 'ENDORSED_MASTER' ||
+            s.masterLifecycleStatus === 'ENDORSED_MASTER'
+        )
+        .toArray(),
+    [],
+    []
+  );
+
   // Helper predicates for clean Panchayat Queue ticket categorization (Bug 4 Resolution)
   const isTicketPending = (s: OfflineDraftSubmission): boolean => {
     const st = s.status || s.masterLifecycleStatus || 'REPORTED';
@@ -290,26 +318,41 @@ const AppContent: React.FC = () => {
   };
 
   // Computed audit counters for Panchayat Desk
-  const pendingEndorsementsCount = (allSubmissions || []).filter(isTicketPending).length;
-  const endorsedSubmissionsCount = (allSubmissions || []).filter(isTicketEndorsed).length;
+  const pendingEndorsementsCount = (pendingDeskSubmissions || []).length;
+  const endorsedSubmissionsCount = (endorsedDeskSubmissions || []).length;
   const rejectedSubmissionsCount = (allSubmissions || []).filter(isTicketRejected).length;
 
-  // Multi-Device Cross-Tab Real-Time Sync Bus Listener (Task 4.4 & Bug 4 Resolution)
+  // Multi-Device Cross-Tab & Network Real-Time Sync Bus Listener (Task 4.4 & Task 6.2)
   useEffect(() => {
     const unsubscribe = centralSyncService.subscribe(async (msg) => {
       if (msg.type === 'RECORD_CREATED') {
-        const payload = msg.payload as { type?: string; id?: string; draft?: OfflineDraftSubmission };
+        const payload = msg.payload as {
+          type?: string;
+          id?: string;
+          draft?: OfflineDraftSubmission;
+          brief?: EngineeringProblemBrief;
+          team?: StudentTeam;
+        };
         if (payload?.type === 'draft' && payload?.draft) {
           const existing = await db.draftSubmissions.get(payload.draft.id);
           if (!existing) {
             await db.draftSubmissions.put(payload.draft);
           }
+        } else if (payload?.type === 'brief' && payload?.brief) {
+          await db.engineeringBriefs.put(payload.brief);
+        } else if (payload?.type === 'team' && payload?.team) {
+          await db.studentTeams.put(payload.team);
+        } else if (payload?.id) {
+          const existing = await db.draftSubmissions.get(payload.id);
+          if (!existing) {
+            await centralSyncService.syncWithRemoteHub();
+          }
         }
         setStatusNotification({
           text:
             language === 'hi'
-              ? 'नया नागरिक शिकायत पत्र प्राप्त हुआ — पंचायत सत्यापन कतार अद्यतित!'
-              : 'New citizen intake report received — Panchayat verification queue updated immediately!',
+              ? 'नया रिकॉर्ड प्राप्त हुआ — कतार अद्यतित!'
+              : 'New intake/solver record received — local queues updated immediately!',
           type: 'info',
         });
         setTimeout(() => setStatusNotification(null), 4500);
@@ -347,19 +390,152 @@ const AppContent: React.FC = () => {
         });
         setTimeout(() => setStatusNotification(null), 4500);
       } else if (msg.type === 'RECORD_UPDATED') {
-        const payload = msg.payload as { id?: string; status?: IssueStatus; masterLifecycleStatus?: IssueStatus };
-        if (payload?.id) {
+        const payload = msg.payload as {
+          type?: string;
+          id?: string;
+          briefId?: string;
+          mentorId?: string;
+          status?: IssueStatus | BriefStatus;
+          masterLifecycleStatus?: IssueStatus;
+          brief?: EngineeringProblemBrief;
+          team?: StudentTeam;
+          mentor?: FacultyMentorProfile;
+        };
+        if (payload?.team) {
+          await db.studentTeams.put(payload.team);
+        }
+        if (payload?.mentor) {
+          await db.facultyMentors.put(payload.mentor);
+        }
+        if (payload?.type === 'brief' && payload?.briefId && payload?.status) {
+          const existing = await db.engineeringBriefs.get(payload.briefId);
+          if (existing && existing.status !== payload.status) {
+            await db.engineeringBriefs.update(payload.briefId, {
+              status: payload.status as BriefStatus,
+            });
+          }
+        } else if (payload?.id && payload?.type !== 'team') {
           const targetStatus = payload.status || payload.masterLifecycleStatus;
           if (targetStatus) {
             const existing = await db.draftSubmissions.get(payload.id);
             if (existing && existing.masterLifecycleStatus !== targetStatus) {
               await db.draftSubmissions.update(payload.id, {
-                status: targetStatus,
-                masterLifecycleStatus: targetStatus,
+                status: targetStatus as IssueStatus,
+                masterLifecycleStatus: targetStatus as IssueStatus,
               });
             }
           }
         }
+      } else if (msg.type === 'TEAM_CLAIMED') {
+        const payload = msg.payload as {
+          team?: StudentTeam;
+          briefId?: string;
+        };
+        if (payload?.team) {
+          await db.studentTeams.put(payload.team);
+        }
+        if (payload?.briefId) {
+          const brief = await db.engineeringBriefs.get(payload.briefId);
+          if (brief && brief.status !== 'CLAIMED') {
+            await db.engineeringBriefs.update(payload.briefId, { status: 'CLAIMED' });
+          }
+        }
+        setStatusNotification({
+          text:
+            language === 'hi'
+              ? `नया कैपस्टोन दावा: टीम ${payload?.team?.teamName || ''} (${payload?.team?.leadCollege || ''}) ने चुनौती का दावा किया!`
+              : `Capstone Challenge Claimed: Team "${payload?.team?.teamName || ''}" (${payload?.team?.leadCollege || ''}) registered claim!`,
+          type: 'info',
+        });
+        setTimeout(() => setStatusNotification(null), 4500);
+      } else if (msg.type === 'MENTOR_REQUESTED') {
+        const payload = msg.payload as {
+          teamId?: string;
+          mentorId?: string;
+          team?: StudentTeam;
+          mentor?: FacultyMentorProfile;
+        };
+        if (payload?.team) {
+          await db.studentTeams.put(payload.team);
+        } else if (payload?.teamId && payload?.mentorId) {
+          const existingTeam = await db.studentTeams.get(payload.teamId);
+          if (existingTeam) {
+            await db.studentTeams.update(payload.teamId, {
+              assignedMentorId: payload.mentorId,
+              mentorStatus: 'PENDING_APPROVAL',
+              mentorRequestTimestamp: Date.now(),
+            });
+          }
+        }
+        if (payload?.mentor) {
+          await db.facultyMentors.put(payload.mentor);
+        }
+        setStatusNotification({
+          text:
+            language === 'hi'
+              ? `संकाय मेंटर अनुरोध प्रेषित! समीक्षा कतार अद्यतित हुई।`
+              : `Mentorship proposal requested for Team "${payload?.team?.teamName || payload?.teamId || ''}" — Faculty review queue updated.`,
+          type: 'info',
+        });
+        setTimeout(() => setStatusNotification(null), 4500);
+      } else if (msg.type === 'MENTOR_APPROVED') {
+        const payload = msg.payload as {
+          teamId?: string;
+          mentorId?: string;
+          team?: StudentTeam;
+          mentor?: FacultyMentorProfile;
+        };
+        if (payload?.team) {
+          await db.studentTeams.put(payload.team);
+        } else if (payload?.teamId) {
+          const existingTeam = await db.studentTeams.get(payload.teamId);
+          if (existingTeam) {
+            await db.studentTeams.update(payload.teamId, {
+              mentorStatus: 'APPROVED',
+              assignedMentorId: payload.mentorId || existingTeam.assignedMentorId,
+            });
+          }
+        }
+        if (payload?.mentor) {
+          await db.facultyMentors.put(payload.mentor);
+        }
+        setStatusNotification({
+          text:
+            language === 'hi'
+              ? `संकाय मेंटर द्वारा टीम अनुमोदित! कैपस्टोन विकास प्रारंभ (APPROVED)।`
+              : `Mentorship officially approved for Team "${payload?.team?.teamName || payload?.teamId || ''}" (APPROVED)!`,
+          type: 'success',
+        });
+        setTimeout(() => setStatusNotification(null), 4500);
+      } else if (msg.type === 'TECHNICAL_QUERY_POSTED') {
+        const payload = msg.payload as {
+          query?: PanchayatTechnicalQuery;
+          masterIssueId?: string;
+          briefId?: string;
+        };
+        if (payload?.query) {
+          const existing = await db.technicalQueries.get(payload.query.id);
+          if (!existing) {
+            await db.technicalQueries.put(payload.query);
+          }
+        }
+        setStatusNotification({
+          text:
+            language === 'hi'
+              ? 'नया फील्ड स्पष्टीकरण प्रश्न पंचायत डेस्क पर प्रेषित हुआ!'
+              : 'New field clarification query dispatched to Panchayat desk!',
+          type: 'info',
+        });
+        setTimeout(() => setStatusNotification(null), 4500);
+      } else if (msg.type === 'DATABASE_FULL_SYNC') {
+        setStatusNotification({
+          text:
+            language === 'hi'
+              ? 'केंद्रीय नेटवर्क से पंचायत सत्यापन एवं समाधानकर्ता कतार अद्यतित हुई!'
+              : 'Panchayat verification & academic solver queues synchronized with remote hub!',
+          type: 'info',
+        });
+        setTimeout(() => setStatusNotification(null), 4000);
       }
     });
 
@@ -457,38 +633,24 @@ const AppContent: React.FC = () => {
         intensityScore: 1,
       });
 
-      // Deduplication & Spatial Clustering Heuristic (Task 1.5)
-      const existingList = allSubmissions || [];
-      const clusterResult = calculateIntensityScore(existingList, newDraft);
+      if (targetStatus === 'QUEUED') {
+        newDraft.syncStatus = 'QUEUED';
+      }
 
-      if (clusterResult.isDuplicate) {
+      // Sprint 6 - Task 6.3: Distributed Spatial Clustering & Deduplication Engine
+      const clusterResult = await clusterAndSaveSubmission(newDraft);
+
+      if (clusterResult.isDirectUserDuplicate) {
         setStatusNotification({
           text:
             language === 'hi'
-              ? `नागरिक डुप्लिकेट प्रविष्टि: यह समस्या आपके नंबर से पूर्व में दर्ज की जा चुकी है (टिकट ID: #${clusterResult.clusteredMasterId?.slice(0, 8)})।`
-              : `Duplicate Report Flagged: Identical report already recorded for this citizen token (#${clusterResult.clusteredMasterId?.slice(0, 8)}).`,
+              ? `नागरिक डुप्लिकेट प्रविष्टि: यह समस्या आपके नंबर से पूर्व में दर्ज की जा चुकी है (टिकट ID: #${clusterResult.targetMasterIssueId?.slice(0, 8)})।`
+              : `Duplicate Report Flagged: Identical report already recorded for this citizen token (#${clusterResult.targetMasterIssueId?.slice(0, 8)}).`,
           type: 'info',
         });
         return;
       }
 
-      if (clusterResult.clusteredMasterId) {
-        // Clustered with existing master issue in same Panchayat or < 1km
-        newDraft.intensityScore = clusterResult.updatedIntensity;
-        const masterCard = await getDraft(clusterResult.clusteredMasterId);
-        if (masterCard) {
-          await saveDraft({
-            ...masterCard,
-            intensityScore: clusterResult.updatedIntensity,
-          });
-        }
-      }
-
-      if (targetStatus === 'QUEUED') {
-        newDraft.syncStatus = 'QUEUED';
-      }
-
-      await saveDraft(newDraft);
       centralSyncService.publish('RECORD_CREATED', {
         type: 'draft',
         id: newDraft.id,
@@ -501,10 +663,10 @@ const AppContent: React.FC = () => {
       setCapturedAudioBlob(null);
       setCapturedAudioDuration(0);
 
-      const clusterNotice = clusterResult.clusteredMasterId
+      const clusterNotice = clusterResult.shouldMergeIntoMaster && clusterResult.targetMasterIssueId
         ? language === 'hi'
-          ? ` • क्लस्टर प्रभाव बढ़ा (${clusterResult.updatedIntensity} नागरिक)`
-          : ` • Clustered Impact Escalated (${clusterResult.updatedIntensity} citizens)`
+          ? ` • स्थानिक क्लस्टर प्रभाव बढ़ा (${clusterResult.newIntensityScore} नागरिक, दायरा: ${clusterResult.distanceMeters ?? '<1000'}m)`
+          : ` • Clustered into Master Issue (${clusterResult.newIntensityScore} citizens, radius: ${clusterResult.distanceMeters ?? '<1000'}m)`
         : '';
 
       setStatusNotification({
@@ -635,9 +797,8 @@ const AppContent: React.FC = () => {
     }
   };
 
-  // Batch sync action
+  // Batch sync action (Sprint 6 - Task 6.1: Cross-Device Synchronization)
   const handleBatchSync = async () => {
-    if (!queuedSubmissions || queuedSubmissions.length === 0) return;
     setIsSimulatingSync(true);
     setStatusNotification({
       text:
@@ -648,18 +809,13 @@ const AppContent: React.FC = () => {
     });
 
     try {
-      await new Promise((res) => setTimeout(res, 1800));
-
-      for (const item of queuedSubmissions) {
-        const generatedMasterId = `JH-2026-M-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
-        await markAsSynced(item.id, generatedMasterId);
-      }
+      const result = await centralSyncService.syncWithRemoteHub();
 
       setStatusNotification({
         text:
           language === 'hi'
-            ? `${queuedSubmissions.length} नागरिक रिपोर्ट सफलतापूर्वक केंद्रीय मास्टर डेटाबेस में दर्ज हो गईं!`
-            : `Sync Complete: ${queuedSubmissions.length} offline reports promoted to Central Master Register.`,
+            ? `सिंक पूर्ण! प्रेषित: ${result.pushed}, प्राप्त: ${result.pulled} रिकॉर्ड।`
+            : `Sync Complete: ${result.pushed} offline reports pushed, ${result.pulled} pulled from Central Registry.`,
         type: 'success',
       });
       setTimeout(() => setStatusNotification(null), 5000);
@@ -1082,27 +1238,76 @@ const AppContent: React.FC = () => {
                                 </span>
                               )}
 
-                              <span className="font-extrabold text-xs text-slate-900">
+                              {/* Statutory Urgency Tag (Sprint 6 - Task 6.2) */}
+                              <span
+                                className={`inline-flex items-center gap-1 text-[10px] font-black uppercase px-2 py-0.5 border ${
+                                  entry.severity === 'CRITICAL' || entry.intensityScore >= 5
+                                    ? 'bg-red-700 text-white border-red-800 shadow-2xs animate-pulse'
+                                    : entry.severity === 'HIGH' || entry.intensityScore >= 3
+                                    ? 'bg-amber-600 text-white border-amber-700 shadow-2xs'
+                                    : entry.severity === 'LOW'
+                                    ? 'bg-blue-600 text-white border-blue-700'
+                                    : 'bg-slate-200 text-slate-800 border-slate-300'
+                                }`}
+                              >
+                                <span>
+                                  {entry.severity
+                                    ? `URGENCY: ${entry.severity}`
+                                    : entry.intensityScore >= 5
+                                    ? 'URGENCY: CRITICAL (HIGH IMPACT)'
+                                    : entry.intensityScore >= 3
+                                    ? 'URGENCY: HIGH PRIORITY'
+                                    : 'URGENCY: STANDARD'}
+                                </span>
+                              </span>
+
+                              <span className="font-extrabold text-xs text-slate-900 font-mono">
                                 {entry.maskedCitizenId}
                               </span>
 
                               {entry.isWhistleblower && (
                                 <span className="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.2 bg-red-100 text-red-900 border border-red-300">
-                                  Whistleblower
+                                  Whistleblower Protected
+                                </span>
+                              )}
+
+                              {/* High-Distress Badge when intensityScore >= 3 (Sprint 6 - Task 6.3) */}
+                              {entry.intensityScore >= 3 && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase px-2 py-0.5 bg-red-100 text-red-950 border border-red-500 shadow-2xs animate-pulse">
+                                  <Users className="w-3 h-3 text-red-700" />
+                                  <span>
+                                    {language === 'hi'
+                                      ? `तीव्र जन-प्रभाव: ${entry.intensityScore} नागरिक प्रभावित`
+                                      : `High Citizen Cluster: ${entry.intensityScore} Citizens Affected`}
+                                  </span>
                                 </span>
                               )}
 
                               {/* Citizen Impact Counter Badge */}
                               <span
                                 className={`inline-flex items-center gap-1 text-[10px] font-mono font-bold px-2 py-0.5 border ${
-                                  entry.intensityScore > 1
-                                    ? 'bg-amber-100 text-amber-900 border-amber-400 shadow-2xs'
+                                  entry.intensityScore >= 3
+                                    ? 'bg-amber-100 text-amber-950 border-amber-400 shadow-2xs'
+                                    : entry.intensityScore > 1
+                                    ? 'bg-amber-50 text-amber-900 border-amber-300'
                                     : 'bg-slate-100 text-slate-700 border-slate-300'
                                 }`}
                               >
                                 <Users className="w-3 h-3 text-[#7A1B1B]" />
                                 <span>Impact: {entry.intensityScore || 1} Citizens Clustered</span>
                               </span>
+
+                              {/* Spatial Proximity Radius Indicator */}
+                              {entry.intensityScore > 1 && (
+                                <span className="inline-flex items-center gap-1 text-[9px] font-mono font-semibold px-1.5 py-0.5 bg-blue-50 text-blue-900 border border-blue-300">
+                                  <MapPin className="w-2.5 h-2.5 text-blue-700" />
+                                  <span>
+                                    {language === 'hi'
+                                      ? 'क्लस्टर दायरा: <1000m (हैवर्सिन सूत्र)'
+                                      : 'Clustered within <1000m of Master Issue'}
+                                  </span>
+                                </span>
+                              )}
 
                               <span className="text-[10px] text-slate-500 font-mono">
                                 {new Date(entry.timestamp).toLocaleDateString([], {
@@ -1117,17 +1322,38 @@ const AppContent: React.FC = () => {
                               </span>
                             </div>
 
-                            {/* Category, Transcript & Voice */}
-                            <div className="flex flex-wrap items-center gap-2">
+                            {/* Category & Media Indicators (Photo / Audio Flags) Strip */}
+                            <div className="flex flex-wrap items-center gap-2 pt-0.5">
                               <span className="text-xs font-bold text-slate-900">
                                 {entry.aiTriageCategory}
                               </span>
-                              {entry.audioDurationSeconds ? (
-                                <span className="inline-flex items-center gap-1 text-[10px] font-mono text-emerald-800 bg-emerald-50 px-1.5 py-0.2 border border-emerald-300">
-                                  <Volume2 className="w-2.5 h-2.5" />
-                                  <span>Voice Memo: {entry.audioDurationSeconds}s</span>
-                                </span>
-                              ) : null}
+
+                              {/* Media Indicators Strip */}
+                              <div className="flex items-center gap-1.5">
+                                {entry.photoBlob || entry.photoPreviewUrl ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.2 bg-emerald-100 text-emerald-900 border border-emerald-300">
+                                    <Camera className="w-3 h-3 text-emerald-700" />
+                                    <span>Photo Attached</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.2 bg-slate-100 text-slate-500 border border-slate-200">
+                                    <Camera className="w-3 h-3 text-slate-400" />
+                                    <span>No Photo</span>
+                                  </span>
+                                )}
+
+                                {entry.audioBlob || entry.audioDurationSeconds ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-mono font-bold px-1.5 py-0.2 bg-emerald-100 text-emerald-900 border border-emerald-300">
+                                    <Volume2 className="w-3 h-3 text-emerald-700" />
+                                    <span>Voice Memo {entry.audioDurationSeconds ? `(${entry.audioDurationSeconds}s)` : 'Attached'}</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.2 bg-slate-100 text-slate-500 border border-slate-200">
+                                    <Volume2 className="w-3 h-3 text-slate-400" />
+                                    <span>No Audio</span>
+                                  </span>
+                                )}
+                              </div>
                             </div>
 
                             {entry.transcriptionDraft && (
@@ -1137,11 +1363,14 @@ const AppContent: React.FC = () => {
                             )}
 
                             {/* LGD Hierarchy Strip */}
-                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-600 font-mono">
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-600 font-mono bg-slate-100/70 p-1.5 border border-slate-200">
                               <span className="inline-flex items-center gap-1 text-slate-800">
-                                <MapPin className="w-3 h-3 text-[#7A1B1B]" />
+                                <MapPin className="w-3.5 h-3.5 text-[#7A1B1B] shrink-0" />
                                 <span>
-                                  GP: <strong>{entry.lgdLocation?.panchayatName}</strong> ({entry.lgdLocation?.blockName}, {entry.lgdLocation?.districtName}) &bull; LGD Code: <strong className="text-emerald-800">{entry.lgdLocation?.panchayatCode}</strong>
+                                  GP: <strong>{entry.lgdLocation?.panchayatName || 'Arsande'}</strong> (Block:{' '}
+                                  <strong>{entry.lgdLocation?.blockName || 'Kanke'}</strong>, District:{' '}
+                                  <strong>{entry.lgdLocation?.districtName || 'Ranchi'}</strong>) &bull; LGD Code:{' '}
+                                  <strong className="text-emerald-800 font-mono">{entry.lgdLocation?.panchayatCode || '114829'}</strong>
                                 </span>
                               </span>
                             </div>
@@ -1422,6 +1651,35 @@ const AppContent: React.FC = () => {
                               <span>{b.fieldEvidenceSummary.householdImpact} Families</span>
                             </span>
                           </div>
+
+                          {/* Verified Claimed Team Badge & Assigned HEI Institution (Sprint 6 - Task 6.4) */}
+                          {b.status === 'CLAIMED' && (() => {
+                            const claimedTeam = (allTeams || []).find((t) => t.briefId === b.id);
+                            if (!claimedTeam) return null;
+                            const uniqueDepts = Array.from(new Set(claimedTeam.roster.map((m) => m.department)));
+                            return (
+                              <div className="bg-emerald-50/90 border border-emerald-300 p-2.5 text-xs space-y-1 shadow-2xs mt-2">
+                                <div className="flex flex-wrap items-center justify-between gap-1">
+                                  <span className="font-extrabold text-emerald-950 inline-flex items-center gap-1.5">
+                                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
+                                    <span>Team: {claimedTeam.teamName}</span>
+                                  </span>
+                                  <span className="text-[10px] font-mono bg-white px-2 py-0.5 border border-emerald-300 text-emerald-900 font-bold shadow-2xs">
+                                    {claimedTeam.leadCollege}
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-slate-600 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                  <span>
+                                    Lead: <strong className="text-slate-800 font-medium">{claimedTeam.leadStudentName}</strong>
+                                  </span>
+                                  <span>&bull;</span>
+                                  <span>
+                                    Roster: <strong className="text-emerald-800">{claimedTeam.roster.length} Solvers</strong> ({uniqueDepts.join(' + ')})
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })()}
                         </div>
 
                         {/* Card CTA */}
@@ -1443,17 +1701,13 @@ const AppContent: React.FC = () => {
                               </button>
                             ) : (
                               <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="px-2 py-1 bg-emerald-100 text-emerald-900 border border-emerald-300 text-[10px] font-bold uppercase inline-flex items-center gap-1">
-                                  <CheckCircle2 className="w-3 h-3 text-emerald-700" />
-                                  <span>Claimed / In Roster</span>
-                                </span>
                                 <button
                                   type="button"
                                   onClick={() => setSelectedBriefForQuery(b)}
-                                  className="px-2.5 py-1 bg-[#0B2545] hover:bg-[#1E3A5F] text-white text-[11px] font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer shadow-2xs"
+                                  className="px-2.5 py-1.5 bg-[#0B2545] hover:bg-[#1E3A5F] text-white text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer shadow-2xs"
                                   title="Open Panchayat Field Clarification Bridge"
                                 >
-                                  <MessageSquare className="w-3 h-3 text-amber-300" />
+                                  <MessageSquare className="w-3.5 h-3.5 text-amber-300" />
                                   <span>
                                     {language === 'hi'
                                       ? 'पंचायत स्पष्टीकरण'
@@ -1467,10 +1721,10 @@ const AppContent: React.FC = () => {
                                     const associatedTeam = (allTeams || []).find((t) => t.briefId === b.id) || null;
                                     setSelectedTeamForMentor({ brief: b, team: associatedTeam });
                                   }}
-                                  className="px-2.5 py-1 bg-[#7A1B1B] hover:bg-[#631515] text-[#F8E7A2] text-[11px] font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer shadow-2xs"
+                                  className="px-2.5 py-1.5 bg-[#7A1B1B] hover:bg-[#631515] text-[#F8E7A2] text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer shadow-2xs"
                                   title="Request Faculty Mentorship with 70/30 Capacity Matchmaking"
                                 >
-                                  <GraduationCap className="w-3 h-3 text-amber-300" />
+                                  <GraduationCap className="w-3.5 h-3.5 text-amber-300" />
                                   <span>{language === 'hi' ? 'मेंटर अनुरोध' : 'Request Mentor'}</span>
                                 </button>
                               </div>
@@ -1872,11 +2126,22 @@ const AppContent: React.FC = () => {
                               </span>
                             ) : null}
 
-                            {/* Intensity Impact Counter Badge */}
-                            {entry.intensityScore > 1 && (
+                            {/* Intensity Impact Counter Badge & High Distress Pill */}
+                            {entry.intensityScore >= 3 ? (
+                              <span className="inline-flex items-center gap-1 text-[9px] font-black px-1.5 py-0.2 bg-red-100 text-red-950 border border-red-400 animate-pulse">
+                                <Users className="w-2.5 h-2.5 text-red-700" />
+                                <span>High Cluster: {entry.intensityScore} Affected</span>
+                              </span>
+                            ) : entry.intensityScore > 1 ? (
                               <span className="inline-flex items-center gap-1 text-[9px] font-mono font-bold px-1.5 py-0.2 bg-amber-100 text-amber-900 border border-amber-400">
                                 <Users className="w-2.5 h-2.5 text-[#7A1B1B]" />
                                 <span>Impact: {entry.intensityScore}</span>
+                              </span>
+                            ) : null}
+
+                            {entry.intensityScore > 1 && (
+                              <span className="inline-flex items-center gap-0.5 text-[8px] font-mono font-bold px-1 py-0.2 bg-blue-50 text-blue-800 border border-blue-200">
+                                &lt;1km Cluster
                               </span>
                             )}
 
@@ -2119,11 +2384,15 @@ const AppContent: React.FC = () => {
         </React.Suspense>
       )}
 
-      {/* Panchayat Field Clarification Bridge Modal (Task 2.3) */}
+      {/* Panchayat Field Clarification Bridge Modal (Task 6.6) */}
       {selectedBriefForQuery && (
         <React.Suspense fallback={null}>
           <PanchayatQueryModal
             brief={selectedBriefForQuery}
+            briefId={selectedBriefForQuery.id}
+            masterIssueId={selectedBriefForQuery.masterIssueId}
+            endorsingOfficerId={selectedBriefForQuery.fieldEvidenceSummary?.district || 'JH-PANCHAYAT-SEC'}
+            panchayatName={selectedBriefForQuery.fieldEvidenceSummary?.block || 'Panchayat Desk'}
             team={(allTeams || []).find((t) => t.briefId === selectedBriefForQuery.id) || null}
             language={language}
             onClose={() => setSelectedBriefForQuery(null)}

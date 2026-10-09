@@ -55,7 +55,95 @@ export interface PanchayatEndorsementModalProps {
   onReject?: (draftId: string, reason: string) => Promise<void>;
 }
 
-const MIN_NOTE_CHARACTERS = 20;
+export const MIN_NOTE_CHARACTERS = 20;
+
+export interface NoteValidationResult {
+  isValid: boolean;
+  length: number;
+  wordCount: number;
+  distinctWordCount: number;
+  hasRepeatedPattern: boolean;
+  errorMessageHi: string;
+  errorMessageEn: string;
+}
+
+/**
+ * Substantive Note Heuristic:
+ * 1. Checks length >= 20 characters
+ * 2. Rejects repeated single-character sequences (e.g. aaaaaaaaaaaaaaaaaaaa or 11111111111111111111)
+ * 3. Requires at least 3 distinct words separated by spaces
+ */
+export function validateSubstantiveNote(text: string): NoteValidationResult {
+  const trimmed = text.trim();
+  const length = trimmed.length;
+
+  if (length < MIN_NOTE_CHARACTERS) {
+    return {
+      isValid: false,
+      length,
+      wordCount: 0,
+      distinctWordCount: 0,
+      hasRepeatedPattern: false,
+      errorMessageHi: `एंटी-रबर-स्टैम्प नियम: स्थलीय निरीक्षण नोट में कम से कम ${MIN_NOTE_CHARACTERS} अक्षर होने अनिवार्य हैं (${MIN_NOTE_CHARACTERS - length} अक्षर शेष)।`,
+      errorMessageEn: `Anti-Rubber-Stamp Rule: Inspection rationale must have at least ${MIN_NOTE_CHARACTERS} characters (${MIN_NOTE_CHARACTERS - length} remaining).`,
+    };
+  }
+
+  // Anti-Gibberish Rule 1: Reject repeated single-character sequences
+  const hasConsecutiveRepeats = /(.)\1{3,}/i.test(trimmed);
+  const nonWhitespace = trimmed.replace(/\s+/g, '');
+  const uniqueChars = new Set(nonWhitespace.toLowerCase());
+  const isHomogeneous = uniqueChars.size < 4 && nonWhitespace.length >= 10;
+
+  if (hasConsecutiveRepeats || isHomogeneous) {
+    return {
+      isValid: false,
+      length,
+      wordCount: 0,
+      distinctWordCount: 0,
+      hasRepeatedPattern: true,
+      errorMessageHi: 'कृपया वास्तविक निरीक्षण टिप्पणी दर्ज करें (Please provide a substantive field inspection note — दोहराए गए वर्ण अमान्य हैं)।',
+      errorMessageEn: 'कृपया वास्तविक निरीक्षण टिप्पणी दर्ज करें (Please provide a substantive field inspection note — repeated characters rejected).',
+    };
+  }
+
+  // Anti-Gibberish Rule 2: Require at least 3 distinct words separated by spaces
+  const words = trimmed.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length < 3) {
+    return {
+      isValid: false,
+      length,
+      wordCount: words.length,
+      distinctWordCount: words.length,
+      hasRepeatedPattern: false,
+      errorMessageHi: 'कृपया वास्तविक निरीक्षण टिप्पणी दर्ज करें (Please provide a substantive field inspection note — कम से कम 3 शब्द आवश्यक हैं)।',
+      errorMessageEn: 'कृपया वास्तविक निरीक्षण टिप्पणी दर्ज करें (Please provide a substantive field inspection note — at least 3 words separated by spaces required).',
+    };
+  }
+
+  const distinctWords = new Set(words.map((w) => w.toLowerCase()));
+  if (distinctWords.size < 3) {
+    return {
+      isValid: false,
+      length,
+      wordCount: words.length,
+      distinctWordCount: distinctWords.size,
+      hasRepeatedPattern: false,
+      errorMessageHi: 'कृपया वास्तविक निरीक्षण टिप्पणी दर्ज करें (Please provide a substantive field inspection note — दोहराए गए शब्द अमान्य हैं)।',
+      errorMessageEn: 'कृपया वास्तविक निरीक्षण टिप्पणी दर्ज करें (Please provide a substantive field inspection note — repetitive single-word phrases are rejected).',
+    };
+  }
+
+  return {
+    isValid: true,
+    length,
+    wordCount: words.length,
+    distinctWordCount: distinctWords.size,
+    hasRepeatedPattern: false,
+    errorMessageHi: '',
+    errorMessageEn: '',
+  };
+}
 
 export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps> = ({
   submission,
@@ -112,16 +200,15 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
     }
   }, [submission.photoBlob, submission.photoPreviewUrl]);
 
-  // Anti-Rubber-Stamp Validation Checks
-  const noteLength = inspectionNote.trim().length;
-  const isNoteValid = noteLength >= MIN_NOTE_CHARACTERS;
+  // Anti-Rubber-Stamp Substantive Validation Checks
+  const noteValidation = validateSubstantiveNote(inspectionNote);
   const isHouseholdsValid = affectedHouseholds >= 1;
   const isSeverityValid = Boolean(severity);
 
-  // Button disabled rule: must be authorized officer + valid note (>= 20 chars) + households >= 1 + severity selected
+  // Button disabled rule: must be authorized officer + substantive note + households >= 1 + severity selected
   const canEndorse =
     isAuthorizedOfficer &&
-    isNoteValid &&
+    noteValidation.isValid &&
     isHouseholdsValid &&
     isSeverityValid &&
     !isSubmitting;
@@ -157,11 +244,9 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
       return;
     }
 
-    if (!isNoteValid) {
+    if (!noteValidation.isValid) {
       setErrorMessage(
-        language === 'hi'
-          ? `एंटी-रबर-स्टैम्प नियम: स्थलीय निरीक्षण नोट में कम से कम ${MIN_NOTE_CHARACTERS} अक्षर होने अनिवार्य हैं (वर्तमान: ${noteLength})।`
-          : `Anti-Rubber-Stamp Violation: Inspection note must be at least ${MIN_NOTE_CHARACTERS} characters (Current: ${noteLength}).`
+        language === 'hi' ? noteValidation.errorMessageHi : noteValidation.errorMessageEn
       );
       return;
     }
@@ -557,16 +642,18 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
                 <span className="text-red-600 ml-1">*</span>
               </label>
 
-              {/* Live Character Counter Indicator */}
+              {/* Live Character Counter & Substantive Heuristic Indicator */}
               <div className="flex items-center gap-1.5 text-xs font-mono font-bold">
                 <span
                   className={`px-2 py-0.5 border ${
-                    isNoteValid
+                    noteValidation.isValid
                       ? 'bg-emerald-100 text-emerald-900 border-emerald-400'
                       : 'bg-red-100 text-red-900 border-red-400 animate-pulse'
                   }`}
                 >
-                  {noteLength} / {MIN_NOTE_CHARACTERS} min chars required
+                  {noteValidation.isValid
+                    ? `✓ ${noteValidation.length} chars • ${noteValidation.wordCount} words (Substantive)`
+                    : `${noteValidation.length} / ${MIN_NOTE_CHARACTERS} min chars`}
                 </span>
               </div>
             </div>
@@ -581,21 +668,21 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
                   : 'Inspected site personally; handpump valve is jammed with reddish corrosive residue, requiring solar filtration unit...'
               }
               className={`w-full text-xs p-2.5 border rounded-none focus:outline-none font-sans ${
-                isNoteValid
+                noteValidation.isValid
                   ? 'border-emerald-600 bg-emerald-50/20'
                   : 'border-slate-400 bg-white focus:border-[#0B2545]'
               }`}
             />
 
-            {!isNoteValid && (
-              <p className="mt-1 text-[11px] text-red-700 font-semibold flex items-center gap-1">
-                <AlertTriangle className="w-3 h-3 shrink-0" />
+            {!noteValidation.isValid && (
+              <div className="mt-1.5 p-2 bg-red-50 border border-red-300 text-[11px] text-red-800 font-semibold flex items-start gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-red-700 mt-0.5" />
                 <span>
                   {language === 'hi'
-                    ? `एंटी-रबर-स्टैम्प नियम: सत्यापन हेतु कम से कम ${MIN_NOTE_CHARACTERS} अक्षरों की स्थलीय रिपोर्ट अनिवार्य है (${MIN_NOTE_CHARACTERS - noteLength} अक्षर शेष)।`
-                    : `Anti-Rubber-Stamp Rule: Inspection rationale must have at least ${MIN_NOTE_CHARACTERS} characters (${MIN_NOTE_CHARACTERS - noteLength} remaining).`}
+                    ? noteValidation.errorMessageHi
+                    : noteValidation.errorMessageEn}
                 </span>
-              </p>
+              </div>
             )}
           </div>
 
@@ -683,8 +770,8 @@ export const PanchayatEndorsementModal: React.FC<PanchayatEndorsementModalProps>
                 title={
                   !isAuthorizedOfficer
                     ? 'Panel Restricted: Requires Panchayat Secretary or BDO credentials'
-                    : !isNoteValid
-                    ? `Anti-Rubber-Stamp Violation: Requires at least ${MIN_NOTE_CHARACTERS} characters in the inspection note (Current: ${noteLength})`
+                    : !noteValidation.isValid
+                    ? (language === 'hi' ? noteValidation.errorMessageHi : noteValidation.errorMessageEn)
                     : !isHouseholdsValid
                     ? 'Affected households must be at least 1'
                     : !isSeverityValid

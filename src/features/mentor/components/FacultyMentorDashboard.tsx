@@ -1,12 +1,19 @@
 /**
  * Project Udbhav (SIH PS ID: 26043 — DHTE Jharkhand)
- * Sprint 2: Academic Engine — Faculty Mentor Appraisal Console (Shoe 3)
+ * Sprint 6 - Task 6.5: Faculty Mentor Appraisal Console & Capacity Engine (Shoe 3)
  * 
  * Enforces Faculty Mentorship Governance:
- * 1. 70/30 Hybrid Quota Balance (Core vs Wildcard Exploratory).
- * 2. Hard Capacity Cap: Max 3 Active Teams.
- * 3. 7-Day Review Expiration countdown with automated rerouting.
- * 4. Milestone 1-4 Capstone Sign-off verification.
+ * 1. Verified Faculty Session Check: Enforces session.role === 'FACULTY_MENTOR' & session.isVerified === true.
+ *    Displays statutory access warning with passkey trigger ('AICTE-FAC-JH-2026') if unverified.
+ * 2. 7-Day Review Expiration & Stalled Proposal Telemetry:
+ *    - Calculates remaining days: Math.max(0, 7 - Math.floor((Date.now() - mentorRequestTimestamp) / (1000 * 60 * 60 * 24))).
+ *    - If daysRemaining <= 2: Displays high-visibility warning pill: "Auto-Rerouting Imminent (X days remaining)".
+ *    - If expired (daysRemaining === 0): Provides 1-click "Auto-Reroute to Alternative Mentor" action.
+ * 3. Atomic Review Decision Actions:
+ *    - Endorse Proposal: Calls approveTeamMentorship(teamId, mentorId).
+ *    - Decline / Reroute: Calls declineTeamMentorship(teamId, mentorId, reason).
+ *    - Publishes updates across CentralSyncService ('RECORD_UPDATED' & 'MENTOR_APPROVED').
+ * 4. Milestone 1-4 Capstone Sign-off verification with Git Contribution Telemetry.
  */
 
 import React, { useState, useEffect } from 'react';
@@ -22,6 +29,8 @@ import {
   School,
   Sparkles,
   GitCommit,
+  Lock,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   FacultyMentorProfile,
@@ -34,8 +43,11 @@ import {
   getFacultyMentors,
   approveTeamMentorship,
   declineTeamMentorship,
+  autoRerouteTeamMentorship,
   advanceTeamMilestone,
 } from '../../../lib/db';
+import { useSession } from '../../../context/SessionContext';
+import { centralSyncService } from '../../../services/centralSyncService';
 import { ContributionTelemetryModal } from './ContributionTelemetryModal';
 import { NaacDossierModal } from './NaacDossierModal';
 
@@ -74,6 +86,12 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
   language = 'en',
 }) => {
+  const { session, openVerificationModal } = useSession();
+
+  // Verified Faculty Session Check
+  const isFacultyVerified =
+    session.role === 'FACULTY_MENTOR' && session.isVerified === true;
+
   const [mentors, setMentors] = useState<FacultyMentorProfile[]>([]);
   const [selectedMentorId, setSelectedMentorId] = useState<string>('');
   const [allTeams, setAllTeams] = useState<StudentTeam[]>([]);
@@ -82,6 +100,7 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
   const [revisionFeedback, setRevisionFeedback] = useState<Record<string, string>>({});
   const [activeRevisionId, setActiveRevisionId] = useState<string | null>(null);
   const [selectedTeamForTelemetry, setSelectedTeamForTelemetry] = useState<StudentTeam | null>(null);
+  const [selectedTeamForDossier, setSelectedTeamForDossier] = useState<StudentTeam | null>(null);
   const [showNaacDossier, setShowNaacDossier] = useState<boolean>(false);
 
   const loadData = async () => {
@@ -124,10 +143,42 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
   // 1-Click Endorse
   const handleApprove = async (teamId: string) => {
     if (!currentFaculty) return;
+    if (!isFacultyVerified) {
+      setNotification({
+        text: 'Verified Faculty Credentials Required (AICTE-FAC-JH-2026). Authenticate to endorse proposals.',
+        isError: true,
+      });
+      openVerificationModal();
+      return;
+    }
+
     try {
       const res = await approveTeamMentorship(teamId, currentFaculty.id);
       if (res.success) {
-        setNotification({ text: 'Team Mentorship Approved Successfully!', isError: false });
+        const [updatedTeam, updatedMentor] = await Promise.all([
+          db.studentTeams.get(teamId),
+          db.facultyMentors.get(currentFaculty.id),
+        ]);
+
+        centralSyncService.publish('RECORD_UPDATED', {
+          type: 'team',
+          id: teamId,
+          status: 'APPROVED',
+          team: updatedTeam,
+          mentor: updatedMentor,
+        });
+
+        centralSyncService.publish('MENTOR_APPROVED', {
+          teamId,
+          mentorId: currentFaculty.id,
+          team: updatedTeam,
+          mentor: updatedMentor,
+        });
+
+        setNotification({
+          text: 'Team Mentorship Proposal Approved Successfully (APPROVED)!',
+          isError: false,
+        });
         await loadData();
       } else {
         setNotification({ text: res.message, isError: true });
@@ -144,8 +195,31 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
   // Decline / Reroute
   const handleDecline = async (teamId: string) => {
     if (!currentFaculty) return;
+    if (!isFacultyVerified) {
+      setNotification({
+        text: 'Verified Faculty Credentials Required (AICTE-FAC-JH-2026). Authenticate to decline proposals.',
+        isError: true,
+      });
+      openVerificationModal();
+      return;
+    }
+
     try {
-      const res = await declineTeamMentorship(teamId, currentFaculty.id);
+      const reason = revisionFeedback[teamId] || 'Declined by faculty mentor';
+      const res = await declineTeamMentorship(teamId, currentFaculty.id, reason);
+      const [updatedTeam, updatedMentor] = await Promise.all([
+        db.studentTeams.get(teamId),
+        db.facultyMentors.get(currentFaculty.id),
+      ]);
+
+      centralSyncService.publish('RECORD_UPDATED', {
+        type: 'team',
+        id: teamId,
+        status: 'REROUTED',
+        team: updatedTeam,
+        mentor: updatedMentor,
+      });
+
       setNotification({
         text: res.message,
         isError: false,
@@ -160,11 +234,67 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
     }
   };
 
+  // 1-Click Auto-Reroute to Alternative Mentor (for stalled/expired proposals)
+  const handleAutoReroute = async (teamId: string) => {
+    if (!currentFaculty) return;
+    try {
+      const res = await autoRerouteTeamMentorship(teamId, currentFaculty.id);
+      if (res.success) {
+        const [updatedTeam, nextMentor] = await Promise.all([
+          db.studentTeams.get(teamId),
+          res.newMentorId ? db.facultyMentors.get(res.newMentorId) : Promise.resolve(undefined),
+        ]);
+
+        centralSyncService.publish('RECORD_UPDATED', {
+          type: 'team',
+          id: teamId,
+          team: updatedTeam,
+          mentorId: res.newMentorId,
+        });
+
+        centralSyncService.publish('MENTOR_REQUESTED', {
+          teamId,
+          mentorId: res.newMentorId,
+          team: updatedTeam,
+          mentor: nextMentor,
+        });
+
+        setNotification({ text: res.message, isError: false });
+        await loadData();
+      } else {
+        setNotification({ text: res.message, isError: true });
+      }
+      setTimeout(() => setNotification(null), 4500);
+    } catch (err) {
+      setNotification({
+        text: err instanceof Error ? err.message : 'Auto-reroute failed',
+        isError: true,
+      });
+    }
+  };
+
   // Advance milestone
   const handleAdvanceMilestone = async (team: StudentTeam) => {
+    if (!isFacultyVerified) {
+      setNotification({
+        text: 'Verified Faculty Credentials Required (AICTE-FAC-JH-2026). Authenticate to sign off capstone milestones.',
+        isError: true,
+      });
+      openVerificationModal();
+      return;
+    }
+
     const nextMilestone = (Math.min(4, team.currentMilestone + 1)) as MilestoneNumber;
     try {
       await advanceTeamMilestone(team.id, nextMilestone);
+      const updatedTeam = await db.studentTeams.get(team.id);
+
+      centralSyncService.publish('RECORD_UPDATED', {
+        type: 'team',
+        id: team.id,
+        team: updatedTeam,
+      });
+
       setNotification({
         text: `Milestone advanced to Stage ${nextMilestone} for team "${team.teamName}"!`,
         isError: false,
@@ -183,22 +313,19 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
     return allBriefs.find((b) => b.id === briefId);
   };
 
-  // 7-day review timer calculator
+  // 7-day review timer calculator (Sprint 6 - Task 6.5)
   const calculateRemainingWindow = (requestTimestamp?: number) => {
-    if (!requestTimestamp) return { remainingDays: 7, remainingHours: 0, isExpired: false };
-    const elapsed = Date.now() - requestTimestamp;
+    const reqTime = requestTimestamp || Date.now();
+    const elapsed = Date.now() - reqTime;
     const remainingMs = SEVEN_DAYS_MS - elapsed;
-
-    if (remainingMs <= 0) {
-      return { remainingDays: 0, remainingHours: 0, isExpired: true };
-    }
-
-    const remainingDays = Math.floor(remainingMs / (24 * 60 * 60 * 1000));
-    const remainingHours = Math.floor(
-      (remainingMs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000)
+    const daysRemaining = Math.max(0, 7 - Math.floor(elapsed / (1000 * 60 * 60 * 24)));
+    const hoursRemaining = Math.max(
+      0,
+      Math.floor((Math.max(0, remainingMs) % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000))
     );
+    const isExpired = remainingMs <= 0 || daysRemaining === 0;
 
-    return { remainingDays, remainingHours, isExpired: false };
+    return { daysRemaining, hoursRemaining, isExpired, remainingMs };
   };
 
   if (!currentFaculty) {
@@ -261,6 +388,35 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
           </select>
         </div>
       </div>
+
+      {/* RBAC Verification Warning Banner */}
+      {!isFacultyVerified && (
+        <div className="p-3.5 bg-amber-50 border-b-2 border-amber-400 text-amber-950 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs">
+          <div className="flex items-start gap-2.5">
+            <Lock className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-black text-xs uppercase tracking-wide">
+                {language === 'hi'
+                  ? 'सत्यापित संकाय मेंटर क्रेडेंशियल आवश्यक (RBAC गेट)'
+                  : 'Verified Faculty Mentor Role Required (RBAC Gate)'}
+              </div>
+              <div className="text-[11px] text-amber-900 mt-0.5">
+                {language === 'hi'
+                  ? 'डीएचटीई झारखंड नियमों के तहत, केवल आधिकारिक रूप से सत्यापित संकाय ही छात्र प्रस्तावों को अनुमोदित कर सकते हैं। आधिकारिक पासकी: AICTE-FAC-JH-2026'
+                  : 'Under DHTE Jharkhand statutory governance, only authenticated accredited faculty can endorse capstone proposals or sign off milestones. Please authenticate using official institutional passkey (AICTE-FAC-JH-2026).'}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={openVerificationModal}
+            className="px-3.5 py-1.5 bg-amber-700 hover:bg-amber-800 text-white text-xs font-bold uppercase rounded-none transition-colors cursor-pointer shrink-0 shadow-2xs inline-flex items-center gap-1.5"
+          >
+            <ShieldCheck className="w-4 h-4 text-amber-200" />
+            <span>{language === 'hi' ? 'संकाय क्रेडेंशियल सत्यापित करें' : 'Verify Faculty Credentials'}</span>
+          </button>
+        </div>
+      )}
 
       {notification && (
         <div
@@ -350,7 +506,7 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
               </div>
               <p className="text-[10px] text-slate-500 font-medium">
                 {isAtCapacity
-                  ? 'Capacity reached. Cannot accept new teams.'
+                  ? 'Capacity reached (Max 3 teams active) — Slot Locked.'
                   : `${3 - currentFaculty.activeProjectsCount} slots available for mentorship.`}
               </p>
             </div>
@@ -378,7 +534,7 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
               </div>
               <p className="text-[10px] text-slate-500 font-medium">
                 {currentFaculty.pendingReviewQueueCount >= 5
-                  ? 'Queue full. Proposals auto-rerouted.'
+                  ? 'Review Queue Full (Max 5 proposals) — Auto-rerouting active.'
                   : `${5 - currentFaculty.pendingReviewQueueCount} proposals can enter queue.`}
               </p>
             </div>
@@ -396,7 +552,10 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
 
           <button
             type="button"
-            onClick={() => setShowNaacDossier(true)}
+            onClick={() => {
+              setSelectedTeamForDossier(null);
+              setShowNaacDossier(true);
+            }}
             className="px-3.5 py-1.5 bg-[#7A1B1B] hover:bg-[#962626] text-white text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
             title="Generate and print statutory NAAC Criterion 3.6 / UGC API Promotion Dossier"
           >
@@ -459,17 +618,23 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
                       <div
                         className={`px-2.5 py-1 text-xs font-black uppercase flex items-center gap-1.5 border ${
                           timer.isExpired
-                            ? 'bg-red-50 text-red-900 border-red-400'
-                            : timer.remainingDays <= 2
-                            ? 'bg-amber-50 text-amber-900 border-amber-400 animate-pulse'
+                            ? 'bg-red-50 text-red-950 border-red-500 font-bold'
+                            : timer.daysRemaining <= 2
+                            ? 'bg-amber-100 text-amber-950 border-amber-500 animate-pulse'
                             : 'bg-emerald-50 text-emerald-900 border-emerald-400'
                         }`}
                       >
-                        <Clock className="w-3.5 h-3.5" />
+                        {timer.isExpired ? (
+                          <AlertTriangle className="w-3.5 h-3.5 text-red-700" />
+                        ) : (
+                          <Clock className="w-3.5 h-3.5" />
+                        )}
                         <span>
                           {timer.isExpired
-                            ? 'Expired: Auto-Reroute Pending'
-                            : `${timer.remainingDays}d ${timer.remainingHours}h remaining before auto-reroute`}
+                            ? '7-Day Period Expired — Auto-Reroute Imminent (0 days remaining)'
+                            : timer.daysRemaining <= 2
+                            ? `Auto-Rerouting Imminent (${timer.daysRemaining} days remaining)`
+                            : `${timer.daysRemaining}d ${timer.hoursRemaining}h remaining before auto-reroute`}
                         </span>
                       </div>
                     </div>
@@ -556,22 +721,42 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
                           </span>
                         </button>
 
-                        {/* Decline / Route to Peer */}
-                        <button
-                          type="button"
-                          onClick={() => handleDecline(team.id)}
-                          className="px-3 py-1.5 bg-white hover:bg-red-50 border border-red-300 text-red-800 text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                          <span>Decline / Route to Peer</span>
-                        </button>
+                        {/* 1-Click Auto-Reroute to Alternative Mentor if Expired or Imminent */}
+                        {timer.isExpired ? (
+                          <button
+                            type="button"
+                            onClick={() => handleAutoReroute(team.id)}
+                            className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer shadow-2xs"
+                            title="Prevent stalled student capstone: Reroute immediately to an alternative accredited faculty mentor"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5 text-amber-200" />
+                            <span>Auto-Reroute to Alternative Mentor</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={!isFacultyVerified}
+                            onClick={() => handleDecline(team.id)}
+                            className="px-3 py-1.5 bg-white hover:bg-red-50 disabled:bg-slate-100 border border-red-300 text-red-800 disabled:text-slate-400 text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>Decline / Route to Peer</span>
+                          </button>
+                        )}
 
                         {/* 1-Click Endorse */}
                         <button
                           type="button"
-                          disabled={isAtCapacity}
+                          disabled={isAtCapacity || !isFacultyVerified}
                           onClick={() => handleApprove(team.id)}
                           className="px-3.5 py-1.5 bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-400 text-white text-xs font-bold uppercase tracking-wider rounded-none shadow-2xs transition-colors inline-flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+                          title={
+                            !isFacultyVerified
+                              ? 'Verified Faculty session required'
+                              : isAtCapacity
+                              ? 'Mentorship Capacity Reached (Max 3 teams)'
+                              : '1-Click Endorse Mentorship'
+                          }
                         >
                           <CheckCircle2 className="w-4 h-4 text-amber-300" />
                           <span>1-Click Endorse Mentorship</span>
@@ -681,7 +866,7 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
                               key={mNum}
                               className={`py-0.5 border ${
                                 team.currentMilestone >= mNum
-                                  ? 'bg-emerald-700 text-white border-emerald-800'
+                                    ? 'bg-emerald-700 text-white border-emerald-800'
                                   : 'bg-white text-slate-400 border-slate-200'
                               }`}
                             >
@@ -694,22 +879,38 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
 
                     {/* Milestone Sign-off CTA */}
                     <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedTeamForTelemetry(team)}
-                        className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
-                        title="View individual git contribution telemetry and free-rider audit"
-                      >
-                        <GitCommit className="w-3.5 h-3.5 text-[#7A1B1B]" />
-                        <span>Contribution Telemetry</span>
-                      </button>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedTeamForTelemetry(team)}
+                          className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                          title="View individual git contribution telemetry and free-rider audit"
+                        >
+                          <GitCommit className="w-3.5 h-3.5 text-[#7A1B1B]" />
+                          <span>Contribution Telemetry</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedTeamForDossier(team);
+                            setShowNaacDossier(true);
+                          }}
+                          className="px-2.5 py-1.5 bg-[#7A1B1B]/10 hover:bg-[#7A1B1B]/20 text-[#7A1B1B] border border-[#7A1B1B]/30 text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                          title="Export NAAC Criterion 3.6 statutory dossier for this project"
+                        >
+                          <FileText className="w-3.5 h-3.5 text-[#7A1B1B]" />
+                          <span>Export NAAC Dossier</span>
+                        </button>
+                      </div>
 
                       <div className="flex items-center gap-2">
                         {team.currentMilestone < 4 ? (
                           <button
                             type="button"
+                            disabled={!isFacultyVerified}
                             onClick={() => handleAdvanceMilestone(team)}
-                            className="px-3 py-1.5 bg-[#0B2545] hover:bg-[#1E3A5F] text-[#F8E7A2] text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                            className="px-3 py-1.5 bg-[#0B2545] hover:bg-[#1E3A5F] disabled:bg-slate-400 text-[#F8E7A2] text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed shadow-2xs"
                           >
                             <Sparkles className="w-3.5 h-3.5 text-amber-300" />
                             <span>Sign-Off Milestone {team.currentMilestone}</span>
@@ -740,14 +941,18 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
         />
       )}
 
-      {/* NAAC Criterion 3.6 & UGC API Dossier Modal (Task 2.5) */}
+      {/* NAAC Criterion 3.6 & UGC API Dossier Modal (Task 6.6) */}
       {showNaacDossier && currentFaculty && (
         <NaacDossierModal
           faculty={currentFaculty}
           supervisedTeams={activeTeams}
           briefs={allBriefs}
+          focusTeam={selectedTeamForDossier}
           language={language}
-          onClose={() => setShowNaacDossier(false)}
+          onClose={() => {
+            setShowNaacDossier(false);
+            setSelectedTeamForDossier(null);
+          }}
         />
       )}
     </section>

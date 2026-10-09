@@ -61,6 +61,7 @@ export interface EngineeringProblemBrief {
   measurableBenchmarks: MeasurableBenchmark[];
   maxCostINR: number; // strict ceiling <= ₹2,500
   fieldEvidenceSummary: FieldEvidenceSummary;
+  intensityScore?: number;
   status: BriefStatus;
   createdAt: number;
 }
@@ -136,6 +137,7 @@ export interface FacultyMentorProfile {
   designation: string;
   department: string;
   institution: string;
+  aicteId?: string;
   coreCompetencyTags: string[]; // e.g., ['water-filtration', 'embedded-iot', 'solar-microgrids']
   activeProjectsCount: number; // Hard capacity cap: max 3
   maxCapacity: number; // Default: 3
@@ -173,6 +175,8 @@ export interface PanchayatTechnicalQuery {
   responseNote?: string;
   status: TechnicalQueryStatus;
   createdAt: number;
+  senderMaskedToken?: string;
+  officerMaskedToken?: string;
 }
 
 /**

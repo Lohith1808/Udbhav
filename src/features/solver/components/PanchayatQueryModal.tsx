@@ -1,9 +1,13 @@
 /**
  * Project Udbhav (SIH PS ID: 26043 — DHTE Jharkhand)
- * Sprint 2: Academic Engine — Panchayat Technical Clarification Bridge Modal
+ * Sprint 6 - Task 6.6: In-App Direct Field Clarification Bridge Modal
  * 
  * Bidirectional technical inquiry conduit connecting student solver teams
- * with grassroots Panchayat field officers while enforcing PII isolation.
+ * with grassroots Panchayat field officers while enforcing strict PII isolation:
+ * - Props: briefId, masterIssueId, endorsingOfficerId, panchayatName (and brief/team).
+ * - Masked identity protection: Strict display of masked tokens (Lead Solver #JH-XXXX, Panchayat Sachiv).
+ * - Query dispatch: Requires >= 15 characters for technical constraint queries.
+ * - Multi-device mesh sync: Broadcasts 'RECORD_UPDATED' & 'TECHNICAL_QUERY_POSTED' via centralSyncService.
  */
 
 import React, { useState, useEffect, useId } from 'react';
@@ -18,6 +22,7 @@ import {
   MapPin,
   HelpCircle,
   Sparkles,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   EngineeringProblemBrief,
@@ -26,21 +31,56 @@ import {
 } from '../../../types/solver';
 import { db, saveTechnicalQuery } from '../../../lib/db';
 import { askGroundZeroClarification } from '../../../services/aiService';
+import { useSession } from '../../../context/SessionContext';
+import { centralSyncService } from '../../../services/centralSyncService';
 
 export interface PanchayatQueryModalProps {
-  brief: EngineeringProblemBrief;
+  briefId?: string;
+  masterIssueId?: string;
+  endorsingOfficerId?: string;
+  panchayatName?: string;
+  brief?: EngineeringProblemBrief | null;
   team?: StudentTeam | null;
   language?: 'en' | 'hi';
   onClose: () => void;
 }
 
 export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
+  briefId,
+  masterIssueId,
+  endorsingOfficerId,
+  panchayatName,
   brief,
   team,
   language = 'en',
   onClose,
 }) => {
   const modalTitleId = useId();
+  const { session } = useSession();
+
+  // Resolve provenance from props or fallback brief
+  const resolvedMasterIssueId = masterIssueId || brief?.masterIssueId || 'JH-2026-M-FIELD';
+  const resolvedBriefId = briefId || brief?.id || 'BRIEF-JH-2026';
+  const resolvedPanchayatName =
+    panchayatName ||
+    (brief?.fieldEvidenceSummary
+      ? `${brief.fieldEvidenceSummary.block}, ${brief.fieldEvidenceSummary.district}`
+      : 'Gram Panchayat Field Desk');
+  const resolvedOfficerId = endorsingOfficerId || 'JH-PANCHAYAT-OFFICER';
+
+  const teamId = team?.id || `TEAM-${resolvedBriefId.slice(-6)}`;
+  const teamName = team?.teamName || 'Collegiate Solver Team';
+
+  // Masked Identity Protection (PII Sanitization)
+  const senderMaskedToken =
+    session.role === 'PANCHAYAT_OFFICER'
+      ? `Panchayat Sachiv (${resolvedPanchayatName.split(',')[0].trim() || 'Field Desk'})`
+      : team?.id
+      ? `Lead Solver #${team.id.replace(/[^0-9A-Z]/gi, '').slice(-4).toUpperCase()}`
+      : session.maskedIdentifier || 'Lead Solver #JH-8492';
+
+  const officerMaskedToken = `Panchayat Sachiv (${resolvedPanchayatName.split(',')[0].trim() || 'Field'})`;
+
   const [queries, setQueries] = useState<PanchayatTechnicalQuery[]>([]);
   const [newQueryText, setNewQueryText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -48,29 +88,28 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
   const [aiAssistantAnswer, setAiAssistantAnswer] = useState<string | null>(null);
   const [isAiAnswering, setIsAiAnswering] = useState<boolean>(false);
 
-  const teamId = team?.id || `TEAM-${brief.id.slice(-6)}`;
-  const teamName = team?.teamName || 'Collegiate Solver Team';
-
   // Load existing queries from Dexie IndexedDB
   const loadQueries = async () => {
     try {
       const records = await db.technicalQueries
         .where('masterIssueId')
-        .equals(brief.masterIssueId)
+        .equals(resolvedMasterIssueId)
         .toArray();
 
       if (records.length === 0) {
-        // Seed default starter query for realistic context if empty
+        // Seed initial starter query for realistic context if empty
         const initialSampleQuery: PanchayatTechnicalQuery = {
           id: `QUERY-JH-${Date.now().toString(36).toUpperCase()}-01`,
           teamId,
-          masterIssueId: brief.masterIssueId,
+          masterIssueId: resolvedMasterIssueId,
           queryText:
             'What is the internal diameter of the tube well casing and what is the static water table depth during pre-monsoon peak?',
           responseNote:
             'BDO / Panchayat Technical Assistant confirmed: Standard Mark-II cylinder casing diameter is 100mm (4 inches). Static water level drops to 32 meters in peak May.',
           status: 'ANSWERED',
           createdAt: Date.now() - 3600000 * 24,
+          senderMaskedToken: 'Lead Solver #JH-8492',
+          officerMaskedToken,
         };
         await saveTechnicalQuery(initialSampleQuery);
         setQueries([initialSampleQuery]);
@@ -84,11 +123,26 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
 
   useEffect(() => {
     loadQueries();
-  }, [brief.masterIssueId]);
+  }, [resolvedMasterIssueId]);
+
+  // Real-time CentralSyncService Multi-Device Mesh Listener
+  useEffect(() => {
+    const unsubscribe = centralSyncService.subscribe((msg) => {
+      if (
+        msg.type === 'TECHNICAL_QUERY_POSTED' ||
+        (msg.type === 'RECORD_UPDATED' && (msg.payload as { type?: string })?.type === 'query')
+      ) {
+        loadQueries();
+      }
+    });
+    return () => unsubscribe();
+  }, [resolvedMasterIssueId]);
+
+  const isQueryValid = newQueryText.trim().length >= 15;
 
   const handleSubmitQuery = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newQueryText.trim() || isSubmitting) return;
+    if (!isQueryValid || isSubmitting) return;
 
     setIsSubmitting(true);
     setStatusMessage(null);
@@ -101,13 +155,30 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
       const newQuery: PanchayatTechnicalQuery = {
         id: queryId,
         teamId,
-        masterIssueId: brief.masterIssueId,
+        masterIssueId: resolvedMasterIssueId,
         queryText: newQueryText.trim(),
         status: 'PENDING_OFFICER',
         createdAt: Date.now(),
+        senderMaskedToken,
       };
 
       await saveTechnicalQuery(newQuery);
+
+      // Broadcast update across paired devices & mesh tabs
+      centralSyncService.publish('RECORD_UPDATED', {
+        type: 'query',
+        id: queryId,
+        query: newQuery,
+        masterIssueId: resolvedMasterIssueId,
+      });
+
+      centralSyncService.publish('TECHNICAL_QUERY_POSTED', {
+        query: newQuery,
+        masterIssueId: resolvedMasterIssueId,
+        briefId: resolvedBriefId,
+        senderToken: senderMaskedToken,
+      });
+
       setNewQueryText('');
       setStatusMessage(
         language === 'hi'
@@ -129,7 +200,9 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
     setIsAiAnswering(true);
     setAiAssistantAnswer(null);
     try {
-      const context = `${brief.title}. Context: ${brief.contextSummary}. Panchayat Field Notes: ${brief.fieldEvidenceSummary.panchayatNote}. District: ${brief.fieldEvidenceSummary.district}, Block: ${brief.fieldEvidenceSummary.block}. Measurable Targets: ${brief.measurableBenchmarks.map(m => `${m.metric}: ${m.targetValue}`).join('; ')}. Statutory Cost: ₹${brief.maxCostINR}.`;
+      const context = brief
+        ? `${brief.title}. Context: ${brief.contextSummary}. Panchayat Field Notes: ${brief.fieldEvidenceSummary.panchayatNote}. District: ${brief.fieldEvidenceSummary.district}, Block: ${brief.fieldEvidenceSummary.block}. Measurable Targets: ${brief.measurableBenchmarks.map(m => `${m.metric}: ${m.targetValue}`).join('; ')}. Statutory Cost: ₹${brief.maxCostINR}.`
+        : `Challenge Master Issue: ${resolvedMasterIssueId}. Location: ${resolvedPanchayatName}.`;
       const ans = await askGroundZeroClarification(newQueryText.trim(), context);
       setAiAssistantAnswer(ans);
     } finally {
@@ -152,12 +225,30 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
       };
 
       const note =
-        sampleResponses[brief.domainSector] ||
+        (brief && sampleResponses[brief.domainSector]) ||
         'Gram Panchayat Officer confirmed: On-site verification confirms feasibility within statutory village commons boundary.';
 
       await db.technicalQueries.update(queryId, {
         status: 'ANSWERED',
         responseNote: note,
+        officerMaskedToken,
+      });
+
+      const updatedQuery = await db.technicalQueries.get(queryId);
+
+      // Broadcast simulated response across network
+      centralSyncService.publish('RECORD_UPDATED', {
+        type: 'query',
+        id: queryId,
+        query: updatedQuery,
+        masterIssueId: resolvedMasterIssueId,
+      });
+
+      centralSyncService.publish('TECHNICAL_QUERY_POSTED', {
+        query: updatedQuery,
+        masterIssueId: resolvedMasterIssueId,
+        briefId: resolvedBriefId,
+        officerToken: officerMaskedToken,
       });
 
       await loadQueries();
@@ -190,7 +281,7 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
                   <span>Grassroots Field Conduit</span>
                 </span>
                 <span className="text-[11px] font-mono text-amber-200 bg-white/10 px-2 py-0.5 border border-white/20">
-                  {brief.masterIssueId}
+                  {resolvedMasterIssueId}
                 </span>
               </div>
               <h2
@@ -228,7 +319,7 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
                 Secure Field Bridge (PII Protected)
               </span>
               <span className="text-[11px] text-emerald-900">
-                Communication routed via masked Panchayat token to protect citizen contact details.
+                Routed via masked tokens: <strong>{senderMaskedToken}</strong> &rarr; <strong>{officerMaskedToken}</strong>. Phone numbers isolated.
               </span>
             </div>
           </div>
@@ -236,7 +327,7 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
           <div className="flex items-center gap-3 shrink-0 text-[11px] text-slate-700 bg-white border border-emerald-200 px-2.5 py-1">
             <span className="flex items-center gap-1">
               <MapPin className="w-3 h-3 text-[#7A1B1B]" />
-              <strong>{brief.fieldEvidenceSummary.block}</strong>, {brief.fieldEvidenceSummary.district}
+              <strong>{resolvedPanchayatName}</strong>
             </span>
             <span className="text-slate-300">|</span>
             <span className="font-bold text-[#0B2545]">{teamName}</span>
@@ -262,7 +353,7 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
                 <span>Submit Technical Clarification / नया तकनीकी प्रश्न</span>
               </h3>
               <span className="text-[10px] font-mono text-slate-500">
-                Direct to Panchayat Desk
+                Direct to {resolvedPanchayatName}
               </span>
             </div>
 
@@ -289,18 +380,31 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
             )}
 
             <form onSubmit={handleSubmitQuery} className="space-y-2">
-              <textarea
-                required
-                rows={3}
-                placeholder="e.g. What is the average borehole casing diameter and water turbidity level during dry season? Is single-phase power accessible near the handpump apron?"
-                value={newQueryText}
-                onChange={(e) => setNewQueryText(e.target.value)}
-                className="w-full p-2.5 text-xs border border-slate-300 focus:border-[#0B2545] focus:ring-1 focus:ring-[#0B2545] outline-none"
-              />
+              <div>
+                <textarea
+                  required
+                  rows={3}
+                  placeholder="e.g. What is the average borehole casing diameter and water turbidity level during dry season? Is single-phase power accessible near the handpump apron?"
+                  value={newQueryText}
+                  onChange={(e) => setNewQueryText(e.target.value)}
+                  className="w-full p-2.5 text-xs border border-slate-300 focus:border-[#0B2545] focus:ring-1 focus:ring-[#0B2545] outline-none"
+                />
+                <div className="flex items-center justify-between text-[10px] pt-1">
+                  <span className={newQueryText.trim().length >= 15 ? 'text-emerald-700 font-bold' : 'text-slate-500'}>
+                    {newQueryText.trim().length} / 15 min characters (technical parameters required)
+                  </span>
+                  {newQueryText.trim().length > 0 && newQueryText.trim().length < 15 && (
+                    <span className="text-amber-700 font-bold flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3 text-amber-600" />
+                      <span>Specify pipe diameter, pressure, soil pH, or electrical supply specs</span>
+                    </span>
+                  )}
+                </div>
+              </div>
 
               <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                 <span className="text-[10px] text-slate-500 italic">
-                  Keep queries focused on physical, electrical, and environmental constraints.
+                  Sender Token: <strong>{senderMaskedToken}</strong> &bull; Zero raw phone numbers transmitted
                 </span>
 
                 <div className="flex items-center gap-2">
@@ -317,8 +421,8 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
 
                   <button
                     type="submit"
-                    disabled={!newQueryText.trim() || isSubmitting}
-                    className="px-4 py-2 bg-[#0B2545] hover:bg-[#1E3A5F] disabled:bg-slate-400 text-white text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs disabled:cursor-not-allowed"
+                    disabled={!isQueryValid || isSubmitting}
+                    className="px-4 py-2 bg-[#0B2545] hover:bg-[#1E3A5F] disabled:bg-slate-300 disabled:text-slate-500 text-white text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs disabled:cursor-not-allowed"
                   >
                     <Send className="w-3.5 h-3.5 text-amber-300" />
                     <span>
@@ -346,7 +450,7 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
                 </span>
               </h3>
               <span className="text-[10px] font-mono text-slate-500">
-                Chronological Log
+                Live Mesh Synchronized
               </span>
             </div>
 
@@ -373,11 +477,17 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
                           : 'bg-amber-50/50 border-l-4 border-l-amber-500 border-amber-200'
                       }`}
                     >
-                      {/* Query Header Strip */}
+                      {/* Query Header Strip with Masked Tokens */}
                       <div className="flex flex-wrap items-center justify-between gap-1 mb-2 text-[11px]">
-                        <span className="font-mono text-slate-500 text-[10px]">
-                          {q.id} &bull; {new Date(q.createdAt).toLocaleDateString()}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-slate-500 text-[10px]">
+                            {q.id} &bull; {new Date(q.createdAt).toLocaleDateString()}
+                          </span>
+                          <span className="font-mono text-slate-800 bg-slate-100 px-1.5 py-0.2 border border-slate-300 font-bold text-[10px] inline-flex items-center gap-1">
+                            <ShieldCheck className="w-3 h-3 text-[#2A6F86]" />
+                            <span>{q.senderMaskedToken || 'Lead Solver #JH-8492'}</span>
+                          </span>
+                        </div>
 
                         <div className="flex items-center gap-1.5">
                           {isAnswered ? (
@@ -397,7 +507,7 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
                       {/* Question Text */}
                       <div className="text-xs text-slate-900 font-medium leading-relaxed bg-slate-50 p-2.5 border border-slate-200">
                         <strong className="text-[#0B2545] block text-[10px] uppercase font-black mb-0.5">
-                          Solver Inquiry:
+                          Technical Inquiry:
                         </strong>
                         &ldquo;{q.queryText}&rdquo;
                       </div>
@@ -408,7 +518,7 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
                           <div className="flex items-center justify-between text-[10px] font-black uppercase text-emerald-950 border-b border-emerald-200 pb-1">
                             <span className="inline-flex items-center gap-1">
                               <ShieldCheck className="w-3.5 h-3.5 text-emerald-700" />
-                              <span>Official Panchayat Inspection Clarification</span>
+                              <span>{q.officerMaskedToken || officerMaskedToken}</span>
                             </span>
                             <span className="font-mono text-emerald-800">
                               Status: Verified Ground Data
@@ -424,7 +534,7 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
                       {!isAnswered && (
                         <div className="mt-2 pt-2 border-t border-amber-200 flex items-center justify-between text-[11px]">
                           <span className="text-amber-800 italic text-[10px]">
-                            Pending response from Block Development Office
+                            Pending response from {resolvedPanchayatName}
                           </span>
                           <button
                             type="button"
@@ -449,7 +559,7 @@ export const PanchayatQueryModal: React.FC<PanchayatQueryModalProps> = ({
         {/* ================================================================== */}
         <div className="bg-slate-100 p-3 sm:p-4 border-t border-slate-300 flex items-center justify-between gap-2 shrink-0">
           <div className="text-[11px] font-mono text-slate-500">
-            {brief.fieldEvidenceSummary.district} / {brief.fieldEvidenceSummary.block}
+            {resolvedPanchayatName} &bull; Officer ID: {resolvedOfficerId}
           </div>
 
           <button

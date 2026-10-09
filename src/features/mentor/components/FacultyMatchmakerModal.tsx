@@ -1,11 +1,15 @@
 /**
  * Project Udbhav (SIH PS ID: 26043 — DHTE Jharkhand)
- * Sprint 2: Academic Engine — Faculty 70/30 Matchmaker Modal
+ * Sprint 6 - Task 6.5: Faculty 70/30 Hybrid Matchmaking & Capacity Engine
  * 
- * Enforces Faculty Mentorship Guardrails:
- * 1. 70% Core Competency vs 30% Wildcard Exploratory slot tagging.
- * 2. Hard capacity cap: Max 3 active projects per faculty mentor.
- * 3. Hard queue ceiling: Max 5 pending review proposals per faculty mentor.
+ * Enforces Faculty Mentorship Governance:
+ * 1. RBAC Session Gate: Enforces verified collegiate student solver / nodal officer credentials.
+ * 2. 70/30 Hybrid Quota Allocation: Dynamically matches challenge domainSector against faculty coreCompetencyTags
+ *    (70% Core Foundational Discipline vs 30% Wildcard Exploratory Cross-Disciplinary).
+ * 3. Dynamic Hard Capacity & Review Queue Locking:
+ *    - Hard capacity cap: Max 3 active projects per faculty mentor.
+ *    - Hard queue ceiling: Max 5 pending review proposals per faculty mentor.
+ * 4. Atomic Assignment & Network Broadcast across CentralSyncService ('RECORD_UPDATED' & 'MENTOR_REQUESTED').
  */
 
 import React, { useState, useEffect, useId } from 'react';
@@ -23,12 +27,15 @@ import {
   FacultyMentorProfile,
   StudentTeam,
   EngineeringProblemBrief,
+  FacultySlotType,
 } from '../../../types/solver';
 import {
   db,
   assignMentorToTeam,
   getFacultyMentors,
 } from '../../../lib/db';
+import { useSession } from '../../../context/SessionContext';
+import { centralSyncService } from '../../../services/centralSyncService';
 
 export interface FacultyMatchmakerModalProps {
   initialTeam?: StudentTeam | null;
@@ -36,6 +43,129 @@ export interface FacultyMatchmakerModalProps {
   language?: 'en' | 'hi';
   onClose: () => void;
   onSuccess: (teamId: string, mentorId: string) => void;
+}
+
+/**
+ * Evaluates dynamic 70/30 hybrid allocation matching the engineering problem brief's
+ * domain sector with the faculty mentor's accredited core competencies and engineering discipline.
+ * 
+ * Statutory 70/30 Rule:
+ * - 70% Quota: CORE_COMPETENCY — Direct foundational engineering discipline match.
+ * - 30% Quota: WILDCARD_EXPLORATORY — Interdisciplinary, high-risk or exploratory grassroots challenge.
+ */
+export function evaluateMentorSlotAllocation(
+  mentor: FacultyMentorProfile,
+  brief?: EngineeringProblemBrief | null
+): {
+  slotType: FacultySlotType;
+  isCoreMatch: boolean;
+  matchReason: string;
+} {
+  if (!brief) {
+    const isCore = mentor.slotType === 'CORE_COMPETENCY';
+    return {
+      slotType: mentor.slotType || 'CORE_COMPETENCY',
+      isCoreMatch: isCore,
+      matchReason: isCore
+        ? 'Accredited Departmental Core Competency (70% Statutory Quota)'
+        : 'Cross-Disciplinary Wildcard Exploratory (30% Statutory Quota)',
+    };
+  }
+
+  const sector = brief.domainSector;
+  const tags = (mentor.coreCompetencyTags || []).map((t) => t.toLowerCase());
+  const dept = (mentor.department || '').toLowerCase();
+
+  const sectorKeywords: Record<string, string[]> = {
+    WATER_RESOURCES: [
+      'water',
+      'filtration',
+      'arsenic',
+      'iron',
+      'groundwater',
+      'purification',
+      'aquifer',
+      'hydrology',
+      'effluent',
+      'environmental',
+      'chemical',
+    ],
+    AGRITECH: [
+      'agri',
+      'crop',
+      'horticulture',
+      'cold-storage',
+      'storage',
+      'post-harvest',
+      'soil',
+      'farm',
+      'harvest',
+      'irrigation',
+      'perishable',
+      'mechanical',
+    ],
+    RURAL_ENERGY: [
+      'solar',
+      'energy',
+      'thermal',
+      'power',
+      'battery',
+      'microgrid',
+      'biomass',
+      'refrigeration',
+      'photovoltaic',
+      'electrical',
+    ],
+    SANITATION: [
+      'sanitation',
+      'waste',
+      'bio',
+      'compost',
+      'drainage',
+      'sewage',
+      'hygiene',
+      'toilet',
+      'sludge',
+    ],
+    HEALTHCARE: [
+      'health',
+      'biomedical',
+      'sensor',
+      'telemetry',
+      'pathogen',
+      'clinic',
+      'medical',
+      'diagnostic',
+    ],
+    CIVIL_INFRA: [
+      'civil',
+      'infra',
+      'structure',
+      'road',
+      'bridge',
+      'masonry',
+      'culvert',
+      'geotechnical',
+      'construction',
+    ],
+  };
+
+  const keywords = sectorKeywords[sector] || [];
+  const hasTagMatch = keywords.some((kw) => tags.some((tag) => tag.includes(kw)));
+  const hasDeptMatch = keywords.some((kw) => dept.includes(kw));
+
+  const isCoreMatch = hasTagMatch || hasDeptMatch;
+  const slotType: FacultySlotType = isCoreMatch
+    ? 'CORE_COMPETENCY'
+    : 'WILDCARD_EXPLORATORY';
+
+  return {
+    slotType,
+    isCoreMatch,
+    matchReason: isCoreMatch
+      ? `Matched foundational engineering discipline for ${sector.replace(/_/g, ' ')} (70% Quota)`
+      : `Cross-disciplinary or exploratory rural innovation challenge for ${sector.replace(/_/g, ' ')} (30% Quota)`,
+  };
 }
 
 export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
@@ -46,6 +176,15 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
   onSuccess,
 }) => {
   const modalTitleId = useId();
+  const { session, openVerificationModal } = useSession();
+
+  // Enforce Verified Solver / Nodal Role
+  const isSolverVerified =
+    session.isVerified === true &&
+    (session.role === 'STUDENT_SOLVER' ||
+      session.role === 'PANCHAYAT_OFFICER' ||
+      session.role === 'GOVT_ADMIN');
+
   const [teams, setTeams] = useState<StudentTeam[]>([]);
   const [selectedTeamId, setSelectedTeamId] = useState<string>(initialTeam?.id || '');
   const [mentors, setMentors] = useState<FacultyMentorProfile[]>([]);
@@ -79,6 +218,15 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
   const selectedTeam = teams.find((t) => t.id === selectedTeamId) || initialTeam;
 
   const handleRequestMentorship = async (mentor: FacultyMentorProfile) => {
+    if (!isSolverVerified) {
+      setResultMessage({
+        text: 'Verified Solver / Nodal Credentials Required (RBAC Gate) — Enter institutional passkey (e.g. AICTE-STUDENT-JH-2026).',
+        isError: true,
+      });
+      openVerificationModal();
+      return;
+    }
+
     if (!selectedTeamId) {
       setResultMessage({
         text: 'Please select a student team first.',
@@ -89,7 +237,7 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
 
     if (mentor.activeProjectsCount >= 3) {
       setResultMessage({
-        text: 'Mentorship Capacity Reached — Slot Locked (Max 3 Active Teams).',
+        text: 'Mentorship Capacity Reached (Max 3 teams active) — Slot Locked',
         isError: true,
       });
       return;
@@ -97,7 +245,7 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
 
     if (mentor.pendingReviewQueueCount >= 5) {
       setResultMessage({
-        text: 'Faculty Pending Review Queue Full (Max 5 Proposals).',
+        text: 'Review Queue Full (Max 5 pending proposals) — Try alternate mentor',
         isError: true,
       });
       return;
@@ -113,6 +261,32 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
         setResultMessage({ text: res.message, isError: true });
         setIsSubmitting(false);
       } else {
+        // Atomic Assignment & Multi-Device Network Broadcast
+        const [updatedTeam, updatedMentor, refreshedMentors, refreshedTeams] = await Promise.all([
+          db.studentTeams.get(selectedTeamId),
+          db.facultyMentors.get(mentor.id),
+          getFacultyMentors(),
+          db.studentTeams.toArray(),
+        ]);
+
+        centralSyncService.publish('RECORD_UPDATED', {
+          type: 'team',
+          id: selectedTeamId,
+          mentorId: mentor.id,
+          team: updatedTeam,
+          mentor: updatedMentor,
+        });
+
+        centralSyncService.publish('MENTOR_REQUESTED', {
+          teamId: selectedTeamId,
+          mentorId: mentor.id,
+          team: updatedTeam,
+          mentor: updatedMentor,
+        });
+
+        setMentors(refreshedMentors);
+        setTeams(refreshedTeams);
+
         setResultMessage({ text: res.message, isError: false });
         setTimeout(() => {
           onSuccess(selectedTeamId, mentor.id);
@@ -128,9 +302,11 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
     }
   };
 
-  const filteredMentors = mentors.filter(
-    (m) => slotFilter === 'ALL' || m.slotType === slotFilter
-  );
+  const filteredMentors = mentors.filter((m) => {
+    if (slotFilter === 'ALL') return true;
+    const alloc = evaluateMentorSlotAllocation(m, brief);
+    return alloc.slotType === slotFilter;
+  });
 
   return (
     <div
@@ -215,7 +391,7 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
             <div className="flex flex-wrap items-center gap-2 font-mono text-[11px]">
               {brief && (
                 <span className="text-amber-300 font-bold truncate max-w-xs">
-                  Challenge: {brief.title}
+                  Challenge: {brief.title} ({brief.domainSector.replace(/_/g, ' ')})
                 </span>
               )}
               {brief && <span>&bull;</span>}
@@ -234,6 +410,35 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
         {/* MODAL BODY (SCROLLABLE) */}
         {/* ================================================================== */}
         <div className="p-4 sm:p-5 overflow-y-auto space-y-4 bg-[#FCFDFE]">
+          {/* RBAC Verification Warning Gate */}
+          {!isSolverVerified && (
+            <div className="p-3.5 bg-amber-50 border-2 border-amber-400 text-amber-950 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs">
+              <div className="flex items-start gap-2.5">
+                <Lock className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-black text-xs uppercase tracking-wide">
+                    {language === 'hi'
+                      ? 'सत्यापित छात्र अन्वेषक / नोडल क्रेडेंशियल आवश्यक (RBAC गेट)'
+                      : 'Verified Student Solver / Nodal Role Required (RBAC Gate)'}
+                  </div>
+                  <div className="text-[11px] text-amber-900 mt-0.5">
+                    {language === 'hi'
+                      ? 'संकाय मेंटरशिप अनुरोध प्रेषित करने के लिए आधिकारिक सत्यापन आवश्यक है। परीक्षण टोकन: AICTE-STUDENT-JH-2026'
+                      : 'Under DHTE Jharkhand governance, only verified collegiate Student Solvers or Nodal Officers can submit faculty mentorship proposals. Authenticate with institutional passkey (e.g. AICTE-STUDENT-JH-2026).'}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={openVerificationModal}
+                className="px-3.5 py-1.5 bg-amber-700 hover:bg-amber-800 text-white text-xs font-bold uppercase rounded-none transition-colors cursor-pointer shrink-0 shadow-2xs inline-flex items-center gap-1.5"
+              >
+                <ShieldCheck className="w-4 h-4 text-amber-200" />
+                <span>{language === 'hi' ? 'क्रेडेंशियल सत्यापित करें' : 'Verify Credentials'}</span>
+              </button>
+            </div>
+          )}
+
           {resultMessage && (
             <div
               className={`p-3 text-xs font-bold border flex items-center gap-2 ${
@@ -261,6 +466,11 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
               <p className="text-[11px] text-slate-600">
                 70% slots are mapped to direct departmental competencies; 30% wildcard exploratory slots
                 support high-risk interdisciplinary student innovation.
+                {brief && (
+                  <span className="font-semibold text-[#0B2545] block mt-0.5">
+                    Active Challenge Domain: <strong>{brief.domainSector.replace(/_/g, ' ')}</strong>
+                  </span>
+                )}
               </p>
             </div>
 
@@ -290,10 +500,11 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
           {/* Faculty Cards Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
             {filteredMentors.map((mentor) => {
-              const isCore = mentor.slotType === 'CORE_COMPETENCY';
+              const allocation = evaluateMentorSlotAllocation(mentor, brief);
+              const isCore = allocation.slotType === 'CORE_COMPETENCY';
               const isAtCapacity = mentor.activeProjectsCount >= 3;
               const isQueueFull = mentor.pendingReviewQueueCount >= 5;
-              const isAvailable = !isAtCapacity && !isQueueFull;
+              const isAvailable = !isAtCapacity && !isQueueFull && isSolverVerified;
               const isAssigned = selectedTeam?.assignedMentorId === mentor.id;
 
               return (
@@ -333,8 +544,9 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
                             ? 'bg-blue-50 text-blue-900 border-blue-400'
                             : 'bg-purple-50 text-purple-900 border-purple-400'
                         }`}
+                        title={allocation.matchReason}
                       >
-                        {isCore ? '70% Core' : '30% Wildcard'}
+                        {isCore ? '70% Core Discipline' : '30% Wildcard Exploratory'}
                       </span>
                     </div>
 
@@ -352,6 +564,9 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
                             #{tag}
                           </span>
                         ))}
+                      </div>
+                      <div className="text-[10px] text-slate-500 font-medium italic pt-1">
+                        {allocation.matchReason}
                       </div>
                     </div>
 
@@ -418,13 +633,13 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
                     {isAtCapacity && (
                       <div className="p-1.5 bg-red-50 border border-red-300 text-red-800 text-[10px] font-bold flex items-center gap-1.5">
                         <Lock className="w-3 h-3 text-red-700 shrink-0" />
-                        <span>Mentorship Capacity Reached — Slot Locked (Max 3 Active)</span>
+                        <span>Mentorship Capacity Reached (Max 3 teams active) — Slot Locked</span>
                       </div>
                     )}
                     {!isAtCapacity && isQueueFull && (
                       <div className="p-1.5 bg-amber-50 border border-amber-300 text-amber-800 text-[10px] font-bold flex items-center gap-1.5">
                         <AlertTriangle className="w-3 h-3 text-amber-700 shrink-0" />
-                        <span>Review Queue Full (Max 5 Proposals Pending)</span>
+                        <span>Review Queue Full (Max 5 pending proposals) — Try alternate mentor</span>
                       </div>
                     )}
                   </div>
@@ -443,6 +658,8 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
                       className={`px-3 py-1.5 text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1.5 shadow-2xs ${
                         isAssigned
                           ? 'bg-emerald-100 text-emerald-900 border border-emerald-300 cursor-default'
+                          : !isSolverVerified
+                          ? 'bg-slate-200 text-slate-600 border border-slate-300 cursor-not-allowed'
                           : isAvailable
                           ? 'bg-[#7A1B1B] hover:bg-[#631515] text-[#F8E7A2] cursor-pointer'
                           : 'bg-slate-200 text-slate-500 border border-slate-300 cursor-not-allowed'
@@ -453,15 +670,25 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
                           <span>Assigned Mentor</span>
                         </>
-                      ) : isAvailable ? (
+                      ) : !isSolverVerified ? (
                         <>
-                          <ShieldCheck className="w-3.5 h-3.5 text-amber-300" />
-                          <span>Request Mentorship</span>
+                          <Lock className="w-3.5 h-3.5 text-slate-500" />
+                          <span>Verification Required</span>
+                        </>
+                      ) : isAtCapacity ? (
+                        <>
+                          <Lock className="w-3.5 h-3.5 text-slate-400" />
+                          <span>Mentorship Capacity Reached — Slot Locked</span>
+                        </>
+                      ) : isQueueFull ? (
+                        <>
+                          <Lock className="w-3.5 h-3.5 text-slate-400" />
+                          <span>Review Queue Full</span>
                         </>
                       ) : (
                         <>
-                          <Lock className="w-3.5 h-3.5 text-slate-400" />
-                          <span>Capacity Cap Locked</span>
+                          <ShieldCheck className="w-3.5 h-3.5 text-amber-300" />
+                          <span>Request Mentorship</span>
                         </>
                       )}
                     </button>
@@ -477,7 +704,7 @@ export const FacultyMatchmakerModal: React.FC<FacultyMatchmakerModalProps> = ({
         {/* ================================================================== */}
         <div className="bg-slate-100 p-3 sm:p-4 border-t border-slate-300 flex items-center justify-between gap-2 shrink-0">
           <div className="text-[11px] text-slate-600 font-medium">
-            Section 135 CSR Faculty Appraisal Guidelines &bull; Max 3 Active Capstones
+            Section 135 CSR Faculty Appraisal Guidelines &bull; Max 3 Active Capstones &bull; 70/30 Quota Balance
           </div>
 
           <button

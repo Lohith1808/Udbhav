@@ -102,6 +102,8 @@ export interface OfflineDraftSubmission {
   panchayatInspectionNotes?: string; // Mandatory on-site verification rationale (min 20 chars)
   panchayatEndorsedAt?: number; // Verification timestamp
   rejectionReason?: string; // Reason if flagged as non-actionable or spam
+  lastSyncedAt?: string; // ISO 8601 timestamp of last network hub sync
+  remoteRevision?: number; // Monotonic remote revision sequence counter
 }
 
 /**

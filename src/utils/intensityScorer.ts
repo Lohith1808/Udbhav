@@ -2,29 +2,42 @@
  * Project Udbhav (SIH PS ID: 26043 — DHTE Jharkhand)
  * Spatial Intensity Clustering & Deduplication Utilities
  * 
- * Strict Heuristic Guardrails:
- * 1. Anti-Duplication: Identifies duplicate filings from the same citizen (phoneHash match)
- * 2. Spatial & LGD Clustering: Clusters reports within the same Gram Panchayat (LGD Code)
- *    or within 1000 meters (1 km) radius into a Master Issue.
- * 3. Citizen Impact Counter: Automatically increments intensityScore for clustered community issues.
+ * Sprint 6 - Task 6.3: Cross-Device Intensity Scoring & Spatial Clustering
+ * - Haversine Formula Spherical Distance (pure Math, zero GIS dependencies)
+ * - Distributed Deduplication & Clustering Engine:
+ *   * Proximity Threshold: <= 1.0 km (1000m) or exact matching LGD panchayatCode
+ *   * Duplicate Rule: Same phoneHash on same cluster = duplicate notification (no score inflation)
+ *   * Impact Aggregation: Distinct phoneHash within radius = Master Issue cluster increment (intensityScore + 1)
  */
 
-import { OfflineDraftSubmission } from '../types/ingestion';
+import { OfflineDraftSubmission, SeverityLevel } from '../types/ingestion';
+
+export interface ClusterEvaluationResult {
+  /** True if filing matches existing phoneHash within radius/panchayat */
+  isDirectUserDuplicate: boolean;
+  /** True if distinct citizen filing should merge into existing Master Issue */
+  shouldMergeIntoMaster: boolean;
+  /** ID of target Master Issue if merged or duplicated */
+  targetMasterIssueId?: string;
+  /** Computed intensity score after evaluation */
+  newIntensityScore: number;
+  /** Reason for clustering classification */
+  clusterReason: 'SAME_USER_REPEAT' | 'SPATIAL_PROXIMITY_MERGE' | 'NEW_ISOLATED_INCIDENT';
+  /** Distance in meters between incoming and matched master issue */
+  distanceMeters?: number;
+}
 
 export interface ClusteringResult {
-  /** True if the filing originates from the exact same phoneHash and target challenge */
   isDuplicate: boolean;
-  /** UUID of the existing Master Issue card that this report clusters into */
   clusteredMasterId?: string;
-  /** Computed Citizen Impact Counter (intensityScore) */
   updatedIntensity: number;
 }
 
-const CLUSTERING_RADIUS_METERS = 1000; // 1 km radius
+export const CLUSTERING_RADIUS_METERS = 1000; // 1.0 km radius
 
 /**
- * Calculates spatial distance between two geographic coordinates in meters
- * using the spherical Haversine formula.
+ * Calculates great-circle spatial distance between two geographic coordinates in meters
+ * using the spherical Haversine formula (pure Math, zero external GIS dependencies).
  * 
  * @param lat1 Latitude of point 1 in decimal degrees
  * @param lon1 Longitude of point 1 in decimal degrees
@@ -32,7 +45,7 @@ const CLUSTERING_RADIUS_METERS = 1000; // 1 km radius
  * @param lon2 Longitude of point 2 in decimal degrees
  * @returns Great-circle distance in meters
  */
-export function calculateDistanceMeters(
+export function calculateHaversineDistance(
   lat1: number,
   lon1: number,
   lat2: number,
@@ -43,10 +56,11 @@ export function calculateDistanceMeters(
   }
 
   const R = 6371e3; // Earth's mean radius in meters
-  const phi1 = (lat1 * Math.PI) / 180;
-  const phi2 = (lat2 * Math.PI) / 180;
-  const deltaPhi = ((lat2 - lat1) * Math.PI) / 180;
-  const deltaLambda = ((lon2 - lon1) * Math.PI) / 180;
+  const toRad = Math.PI / 180;
+  const phi1 = lat1 * toRad;
+  const phi2 = lat2 * toRad;
+  const deltaPhi = (lat2 - lat1) * toRad;
+  const deltaLambda = (lon2 - lon1) * toRad;
 
   const a =
     Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2) +
@@ -57,116 +71,197 @@ export function calculateDistanceMeters(
   return Math.round(R * c);
 }
 
+// Direct aliases for backward-compatibility & task specification compliance
+export const calculateDistanceMeters = calculateHaversineDistance;
+export const haversineDistanceMeters = calculateHaversineDistance;
+
 /**
- * Evaluates whether a new draft submission is a duplicate of an existing record
- * or belongs to an existing localized community cluster.
- * 
- * @param existingSubmissions Array of currently stored draft submissions in IndexedDB
- * @param newSubmission The incoming draft submission to evaluate
- * @returns ClusteringResult with deduplication flag and updated intensity score
+ * Severity ranking order helper: returns numeric weight (CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1)
  */
-export function calculateIntensityScore(
-  existingSubmissions: OfflineDraftSubmission[],
-  newSubmission: OfflineDraftSubmission
-): ClusteringResult {
-  if (!existingSubmissions || existingSubmissions.length === 0) {
+export function getSeverityRank(severity?: SeverityLevel): number {
+  switch (severity) {
+    case 'CRITICAL':
+      return 4;
+    case 'HIGH':
+      return 3;
+    case 'MEDIUM':
+      return 2;
+    case 'LOW':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Resolves the higher of two statutory severity levels to prevent down-ranking on merges
+ */
+export function resolveHighestSeverity(
+  sev1?: SeverityLevel,
+  sev2?: SeverityLevel
+): SeverityLevel | undefined {
+  if (!sev1) return sev2;
+  if (!sev2) return sev1;
+  return getSeverityRank(sev1) >= getSeverityRank(sev2) ? sev1 : sev2;
+}
+
+/**
+ * Evaluates whether an incoming draft submission is a duplicate of an existing record
+ * or belongs to an existing localized community cluster across distributed nodes.
+ * 
+ * @param incoming The incoming draft submission to evaluate
+ * @param existingIssues Array of currently stored draft submissions
+ * @returns ClusterEvaluationResult with deduplication flag, target master ID, and updated intensity score
+ */
+export function evaluateClusterAssignment(
+  incoming: OfflineDraftSubmission,
+  existingIssues: OfflineDraftSubmission[]
+): ClusterEvaluationResult {
+  if (!existingIssues || existingIssues.length === 0) {
     return {
-      isDuplicate: false,
-      updatedIntensity: 1,
+      isDirectUserDuplicate: false,
+      shouldMergeIntoMaster: false,
+      newIntensityScore: 1,
+      clusterReason: 'NEW_ISOLATED_INCIDENT',
     };
   }
 
-  const newLat = newSubmission.rawCoordinates.latitude;
-  const newLon = newSubmission.rawCoordinates.longitude;
-  const newPanchayatCode = newSubmission.lgdLocation?.panchayatCode;
-  const newCategory = (newSubmission.aiTriageCategory || '').toLowerCase();
+  const inLat = incoming.rawCoordinates?.latitude ?? 0;
+  const inLon = incoming.rawCoordinates?.longitude ?? 0;
+  const inPanchayatCode = incoming.lgdLocation?.panchayatCode;
+  const inCategory = (incoming.aiTriageCategory || '').trim().toLowerCase();
 
-  // 1. Exact Duplicate Verification (Same citizen phoneHash)
-  for (const existing of existingSubmissions) {
-    if (existing.id === newSubmission.id) continue;
+  // 1. Identical Citizen Repeat Detection (Same phoneHash)
+  for (const existing of existingIssues) {
+    if (existing.id === incoming.id) continue;
 
-    if (existing.phoneHash === newSubmission.phoneHash) {
-      const existingCategory = (existing.aiTriageCategory || '').toLowerCase();
-      const isSameCategory = existingCategory === newCategory;
+    if (incoming.phoneHash && existing.phoneHash && incoming.phoneHash === existing.phoneHash) {
+      const exLat = existing.rawCoordinates?.latitude ?? 0;
+      const exLon = existing.rawCoordinates?.longitude ?? 0;
+      const dist = calculateHaversineDistance(inLat, inLon, exLat, exLon);
+      const exPanchayatCode = existing.lgdLocation?.panchayatCode;
+      const exCategory = (existing.aiTriageCategory || '').trim().toLowerCase();
 
-      const distance = calculateDistanceMeters(
-        existing.rawCoordinates.latitude,
-        existing.rawCoordinates.longitude,
-        newLat,
-        newLon
-      );
+      const isSameLocation =
+        (inPanchayatCode && exPanchayatCode && inPanchayatCode === exPanchayatCode) ||
+        dist <= CLUSTERING_RADIUS_METERS;
+      const isSameCategory = !inCategory || !exCategory || inCategory === exCategory;
 
-      // Same phone and (same problem category OR within 1 km)
-      if (isSameCategory || distance <= CLUSTERING_RADIUS_METERS) {
+      if (isSameLocation && isSameCategory) {
         return {
-          isDuplicate: true,
-          clusteredMasterId: existing.id,
-          updatedIntensity: existing.intensityScore || 1,
+          isDirectUserDuplicate: true,
+          shouldMergeIntoMaster: false,
+          targetMasterIssueId: existing.id,
+          newIntensityScore: existing.intensityScore || 1,
+          clusterReason: 'SAME_USER_REPEAT',
+          distanceMeters: dist,
         };
       }
     }
   }
 
-  // 2. Spatial & LGD Cluster Matching (Different citizens reporting shared issue)
-  const matchingClusterCandidates: OfflineDraftSubmission[] = [];
+  // 2. Multi-Citizen Spatial Cluster Match (Distinct citizens reporting within <= 1000m or same Panchayat)
+  const clusterCandidates: Array<{ issue: OfflineDraftSubmission; distance: number }> = [];
 
-  for (const existing of existingSubmissions) {
-    if (existing.id === newSubmission.id) continue;
-    // Skip if marked as spam or rejected
+  for (const existing of existingIssues) {
+    if (existing.id === incoming.id) continue;
     if (existing.masterLifecycleStatus === 'REJECTED_SPAM') continue;
 
-    const existingCategory = (existing.aiTriageCategory || '').toLowerCase();
-    const isSameCategory = !newCategory || !existingCategory || existingCategory === newCategory;
+    const exLat = existing.rawCoordinates?.latitude ?? 0;
+    const exLon = existing.rawCoordinates?.longitude ?? 0;
+    const dist = calculateHaversineDistance(inLat, inLon, exLat, exLon);
+    const exPanchayatCode = existing.lgdLocation?.panchayatCode;
+    const exCategory = (existing.aiTriageCategory || '').trim().toLowerCase();
 
-    if (!isSameCategory) continue;
+    const isSameCategory = !inCategory || !exCategory || inCategory === exCategory;
+    const isSamePanchayat = inPanchayatCode && exPanchayatCode && inPanchayatCode === exPanchayatCode;
+    const isWithinRadius = dist <= CLUSTERING_RADIUS_METERS;
 
-    // Check LGD Panchayat code match
-    const existingPanchayatCode = existing.lgdLocation?.panchayatCode;
-    const isSamePanchayat =
-      newPanchayatCode &&
-      existingPanchayatCode &&
-      newPanchayatCode === existingPanchayatCode;
-
-    // Check GPS spatial proximity (<1000m)
-    const distance = calculateDistanceMeters(
-      existing.rawCoordinates.latitude,
-      existing.rawCoordinates.longitude,
-      newLat,
-      newLon
-    );
-    const isWithinRadius = distance <= CLUSTERING_RADIUS_METERS;
-
-    if (isSamePanchayat || isWithinRadius) {
-      matchingClusterCandidates.push(existing);
+    if (isSameCategory && (isSamePanchayat || isWithinRadius)) {
+      clusterCandidates.push({ issue: existing, distance: dist });
     }
   }
 
-  if (matchingClusterCandidates.length > 0) {
-    // Select the primary cluster root (earliest timestamp or already endorsed/synced)
-    matchingClusterCandidates.sort((a, b) => {
-      // Prioritize already endorsed or synced master issues
-      if (a.masterLifecycleStatus === 'ENDORSED_MASTER' && b.masterLifecycleStatus !== 'ENDORSED_MASTER') {
-        return -1;
-      }
-      if (b.masterLifecycleStatus === 'ENDORSED_MASTER' && a.masterLifecycleStatus !== 'ENDORSED_MASTER') {
-        return 1;
-      }
-      return a.timestamp - b.timestamp;
+  if (clusterCandidates.length > 0) {
+    // Select best primary Master Issue candidate:
+    // 1st Priority: Already ENDORSED_MASTER
+    // 2nd Priority: Highest current intensityScore
+    // 3rd Priority: Earliest timestamp
+    clusterCandidates.sort((a, b) => {
+      const aEndorsed = a.issue.masterLifecycleStatus === 'ENDORSED_MASTER' ? 1 : 0;
+      const bEndorsed = b.issue.masterLifecycleStatus === 'ENDORSED_MASTER' ? 1 : 0;
+      if (aEndorsed !== bEndorsed) return bEndorsed - aEndorsed;
+
+      const aScore = a.issue.intensityScore || 1;
+      const bScore = b.issue.intensityScore || 1;
+      if (aScore !== bScore) return bScore - aScore;
+
+      return (a.issue.timestamp || 0) - (b.issue.timestamp || 0);
     });
 
-    const primaryMaster = matchingClusterCandidates[0];
-    const updatedIntensity = (primaryMaster.intensityScore || 1) + 1;
+    const primaryTarget = clusterCandidates[0];
+    const newIntensityScore = (primaryTarget.issue.intensityScore || 1) + 1;
 
     return {
-      isDuplicate: false,
-      clusteredMasterId: primaryMaster.id,
-      updatedIntensity,
+      isDirectUserDuplicate: false,
+      shouldMergeIntoMaster: true,
+      targetMasterIssueId: primaryTarget.issue.id,
+      newIntensityScore,
+      clusterReason: 'SPATIAL_PROXIMITY_MERGE',
+      distanceMeters: primaryTarget.distance,
     };
   }
 
-  // 3. Isolated Single Citizen Issue
+  // 3. New Isolated Incident
   return {
-    isDuplicate: false,
+    isDirectUserDuplicate: false,
+    shouldMergeIntoMaster: false,
+    newIntensityScore: 1,
+    clusterReason: 'NEW_ISOLATED_INCIDENT',
+  };
+}
+
+/**
+ * Backward-compatibility wrapper for calculateIntensityScore
+ */
+export function calculateIntensityScore(
+  existingSubmissions: OfflineDraftSubmission[],
+  newSubmission: OfflineDraftSubmission
+): ClusteringResult {
+  const evalResult = evaluateClusterAssignment(newSubmission, existingSubmissions);
+  return {
+    isDuplicate: evalResult.isDirectUserDuplicate,
+    clusteredMasterId: evalResult.targetMasterIssueId,
+    updatedIntensity: evalResult.newIntensityScore,
+  };
+}
+
+/**
+ * Distributed multi-device clustering helper
+ * Maps evaluateClusterAssignment outcome to explicit network clustering actions
+ */
+export function evaluateCrossDeviceClustering(
+  incoming: OfflineDraftSubmission,
+  existingStore: OfflineDraftSubmission[]
+): {
+  action: 'UPDATE_EXISTING' | 'CREATE_NEW';
+  targetMasterId?: string;
+  updatedIntensity: number;
+  mergedSubmissionsCount: number;
+} {
+  const result = evaluateClusterAssignment(incoming, existingStore);
+  if (result.isDirectUserDuplicate || result.shouldMergeIntoMaster) {
+    return {
+      action: 'UPDATE_EXISTING',
+      targetMasterId: result.targetMasterIssueId,
+      updatedIntensity: result.newIntensityScore,
+      mergedSubmissionsCount: result.newIntensityScore,
+    };
+  }
+  return {
+    action: 'CREATE_NEW',
+    targetMasterId: undefined,
     updatedIntensity: 1,
+    mergedSubmissionsCount: 1,
   };
 }
