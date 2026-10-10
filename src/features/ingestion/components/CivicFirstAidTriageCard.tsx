@@ -1,11 +1,12 @@
 /**
  * Project Udbhav (SIH PS ID: 26043 — DHTE Jharkhand)
- * AI First-Aid Triage & Local Livelihood Dispatch Card (Sprint 4 — Task 4.3)
+ * AI First-Aid Triage & Local Livelihood Dispatch Card (Sprint 8 — Task 8.2)
  * 
  * Features:
- * - Real LLM Structured-Output Triage using Gemini 1.5 Flash
+ * - Dynamic Local Rural Technician Directory & Livelihood Dispatch (Sprint 8 - Task 8.2)
+ * - Real LLM Structured-Output Triage using local Ollama (Llama 3.2) or deterministic fallback
  * - Spoken Vernacular DIY Advice Readout via native HTML5 SpeechSynthesis
- * - Local Rural Technician Auto-Dispatch (Plumber, Electrician, Mechanic, Mason)
+ * - LGD-Mapped Rural Artisan Matching (District, Block & Panchayat)
  * - Chronic Structural Escalation Gate to Academic Solvers (Shoe 2)
  */
 
@@ -17,11 +18,18 @@ import {
   getOllamaModel,
 } from '../../../services/aiService';
 import {
+  getTechniciansByLocation,
+  normalizeTechnicianTrade,
+  TRADE_META,
+  type EmpanelledTechnician,
+} from '../data/techniciansDirectory';
+import {
   Sparkles,
   Wrench,
   Zap,
   Hammer,
   Truck,
+  Sun,
   Volume2,
   VolumeX,
   PhoneCall,
@@ -32,6 +40,9 @@ import {
   Cpu,
   GraduationCap,
   Settings,
+  Star,
+  ShieldCheck,
+  MapPin,
 } from 'lucide-react';
 
 export interface CivicFirstAidTriageCardProps {
@@ -41,6 +52,18 @@ export interface CivicFirstAidTriageCardProps {
   language?: 'hi' | 'en';
   onEscalateToRD?: () => void;
   onOpenAiSettings?: () => void;
+  /** Active geo-tagged LGD location metadata */
+  lgdLocation?: {
+    state?: string;
+    districtName?: string;
+    districtCode?: number;
+    blockName?: string;
+    blockCode?: number;
+    panchayatName?: string;
+    panchayatCode?: number;
+  } | null;
+  districtCode?: number;
+  blockCode?: number;
 }
 
 export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = ({
@@ -50,6 +73,9 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
   language = 'en',
   onEscalateToRD,
   onOpenAiSettings,
+  lgdLocation,
+  districtCode,
+  blockCode,
 }) => {
   const [triageResult, setTriageResult] = useState<CivicFirstAidTriageResult | null>(null);
   const [isEvaluating, setIsEvaluating] = useState<boolean>(false);
@@ -57,7 +83,12 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
   const [resolvedLocally, setResolvedLocally] = useState<boolean>(false);
   const [isOllamaLive, setIsOllamaLive] = useState<boolean>(false);
   const [ollamaModel, setOllamaModel] = useState<string>('llama3.2');
+  const [callDispatchNotice, setCallDispatchNotice] = useState<{
+    message: string;
+    technician: EmpanelledTechnician;
+  } | null>(null);
 
+  // Probe local Ollama status
   useEffect(() => {
     let isMounted = true;
     checkOllamaActive().then((active) => {
@@ -76,6 +107,7 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
 
     setIsEvaluating(true);
     setResolvedLocally(false);
+    setCallDispatchNotice(null);
     try {
       const result = await evaluateCivicFirstAidTriage(transcript, category, village);
       setTriageResult(result);
@@ -106,21 +138,48 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
     }
   };
 
+  const handleSimulateCall = (tech: EmpanelledTechnician) => {
+    const locName = lgdLocation?.panchayatName || village || 'Arsande';
+    const msg =
+      language === 'hi'
+        ? `LGD डिस्पैच ब्रिज सक्रिय: ${tech.name} (${tech.maskedContact}) को ग्राम पंचायत ${locName} हेतु संपर्क किया गया। आजीविका कार्य टोकन जेनरेट किया गया।`
+        : `LGD Dispatch Bridge Connected: Contacted ${tech.name} (${tech.maskedContact}) for Gram Panchayat ${locName}. Rural artisan service ticket generated.`;
+
+    setCallDispatchNotice({
+      message: msg,
+      technician: tech,
+    });
+  };
 
   const getTradeIcon = (trade: string | null) => {
-    switch (trade) {
+    const normalized = normalizeTechnicianTrade(trade);
+    switch (normalized) {
       case 'PLUMBER':
-        return <Wrench className="w-4 h-4 text-sky-700" />;
+        return <Wrench className="w-4 h-4 text-sky-600" />;
       case 'ELECTRICIAN':
-        return <Zap className="w-4 h-4 text-amber-600" />;
-      case 'MECHANIC':
-        return <Truck className="w-4 h-4 text-orange-700" />;
+        return <Zap className="w-4 h-4 text-amber-500" />;
+      case 'PUMP_MECHANIC':
+        return <Truck className="w-4 h-4 text-emerald-600" />;
+      case 'SOLAR_TECHNICIAN':
+        return <Sun className="w-4 h-4 text-amber-500" />;
       case 'MASON':
-        return <Hammer className="w-4 h-4 text-stone-700" />;
+        return <Hammer className="w-4 h-4 text-stone-600" />;
       default:
         return <Wrench className="w-4 h-4 text-slate-700" />;
     }
   };
+
+  // Derive active LGD coordinates & codes
+  const effectiveDistrictCode = lgdLocation?.districtCode ?? districtCode ?? 351;
+  const effectiveBlockCode = lgdLocation?.blockCode ?? blockCode ?? 3188;
+
+  // Retrieve dynamically matched rural technicians
+  const matchedTechnicians = getTechniciansByLocation(
+    effectiveDistrictCode,
+    effectiveBlockCode,
+    triageResult?.suggestedTechnicianTrade
+  );
+  const matchedTechnician = matchedTechnicians[0] || null;
 
   return (
     <div className="bg-white border-2 border-slate-300 p-4 shadow-2xs space-y-3">
@@ -132,7 +191,7 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
           </div>
           <div>
             <div className="text-[10px] uppercase font-bold text-[#7A1B1B] font-mono tracking-wider">
-              SHOE 1 &bull; AI FIRST-AID TRIAGE ENGINE
+              SHOE 1 &bull; AI FIRST-AID TRIAGE &amp; LOCAL DISPATCH
             </div>
             <h3 className="text-xs sm:text-sm font-black text-slate-900 uppercase">
               {language === 'hi'
@@ -174,7 +233,7 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
         <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-50 border border-slate-200 p-3">
           <p className="text-xs text-slate-600">
             {language === 'hi'
-              ? 'क्या यह समस्या तुरंत किसी स्थानीय मिस्त्री (नल/मोटर/मिस्त्री) द्वारा ठीक हो सकती है? एआई द्वारा त्वरित जांच करें:'
+              ? 'क्या यह समस्या तुरंत किसी स्थानीय मिस्त्री (नल/मोटर/इलेक्ट्रीशियन) द्वारा ठीक हो सकती है? एआई द्वारा त्वरित जांच करें:'
               : 'Analyze if this issue can be quickly serviced by a nearby registered rural tradesperson before escalating to university R&D:'}
           </p>
 
@@ -233,6 +292,40 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
             </div>
           </div>
 
+          {/* Prominent Structural Transition Banner (when structural issue identified) */}
+          {(triageResult.escalateToCivicRD || !triageResult.isRoutineMaintenance) && (
+            <div className="bg-[#0B2545] border-2 border-amber-400 p-3.5 text-white space-y-2.5 shadow-2xs">
+              <div className="flex items-center gap-2 text-amber-300 font-extrabold text-xs uppercase tracking-wider">
+                <GraduationCap className="w-4 h-4 text-amber-300 shrink-0" />
+                <span>
+                  {language === 'hi'
+                    ? 'संरचनात्मक तकनीकी समस्या: इंजीनियरिंग विश्वविद्यालय R&D नवाचार हेतु प्रेषित'
+                    : 'Structural Issue Identified: Escalating beyond routine repair to Engineering Capstone R&D (Shoe 2)'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-200 leading-relaxed font-sans">
+                {language === 'hi'
+                  ? 'यह समस्या सामान्य मिस्त्री द्वारा ठीक नहीं हो सकती (उदा. रासायनिक फ्लोराइड संदूषण, माइक्रोग्रिड भंडारण विफलता, सिल्टेशन)। इसे तकनीकी विश्वविद्यालयों के छात्र-शिक्षकों हेतु इंजीनियरिंग ब्रीफ में अग्रेषित किया जा रहा है।'
+                  : 'This challenge exceeds routine village artisan maintenance and requires engineering root-cause resolution (e.g. fluoride de-fluoridation, battery storage chemistry, lift hydraulics). Escalating to Engineering Capstone R&D.'}
+              </p>
+              <div className="pt-1 flex flex-wrap items-center justify-between gap-2 border-t border-slate-700/80">
+                <span className="text-[10px] font-mono font-bold text-amber-200">
+                  Statutory Protocol: NEP 2020 Real-World Capstone Integration
+                </span>
+                {onEscalateToRD && (
+                  <button
+                    type="button"
+                    onClick={onEscalateToRD}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#7A1B1B] hover:bg-[#631515] text-[#F8E7A2] text-xs font-bold uppercase tracking-wider rounded-none shadow-2xs transition-colors cursor-pointer"
+                  >
+                    <span>{language === 'hi' ? 'R&D हेतु अग्रेषित करें' : 'Escalate to Capstone R&D'}</span>
+                    <ArrowRight className="w-3.5 h-3.5 text-amber-300" />
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Actionable DIY Troubleshooting Tip (Vernacular Hindi) */}
           <div className="bg-slate-50 border border-slate-300 p-3 space-y-2">
             <div className="flex items-center justify-between">
@@ -261,39 +354,135 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
             </p>
           </div>
 
-          {/* Local Rural Tradesperson Dispatch Card (If routine maintenance) */}
-          {triageResult.isRoutineMaintenance && triageResult.technicianContactSimulation && (
-            <div className="bg-emerald-50 border border-emerald-300 p-3 space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="text-[11px] font-black uppercase text-emerald-900 flex items-center gap-1.5">
-                  {getTradeIcon(triageResult.suggestedTechnicianTrade)}
-                  <span>Registered Local Technician (पंचायत पंजीकृत तकनीशियन)</span>
-                </div>
-                <span className="text-[10px] bg-emerald-200 text-emerald-950 font-bold px-1.5 py-0.2">
-                  ~{triageResult.technicianContactSimulation.approxDistanceKm} km
-                </span>
-              </div>
-
-              <div className="bg-white p-2.5 border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div>
-                  <div className="font-bold text-xs text-slate-900">
-                    {triageResult.technicianContactSimulation.contactName}
+          {/* Dynamic LGD Rural Artisan Dispatch Card (If routine maintenance) */}
+          {triageResult.isRoutineMaintenance && matchedTechnician && (
+            <div className="bg-emerald-50/70 border-2 border-emerald-500/60 p-3.5 space-y-3 shadow-2xs">
+              <div className="flex flex-wrap items-center justify-between gap-1.5 border-b border-emerald-200/80 pb-2">
+                <div className="text-xs font-extrabold uppercase text-emerald-950 flex items-center gap-2">
+                  <div className="p-1 bg-emerald-800 text-white rounded-none">
+                    {getTradeIcon(matchedTechnician.trade)}
                   </div>
-                  <div className="text-[11px] text-slate-600">
-                    {triageResult.technicianContactSimulation.tradeTitle}
-                  </div>
+                  <span>
+                    {language === 'hi'
+                      ? 'पंजीकृत स्थानीय तकनीशियन (LGD ग्रामीण आजीविका)'
+                      : 'Registered Local Technician (LGD Rural Livelihood Dispatch)'}
+                  </span>
                 </div>
 
-                {triageResult.technicianContactSimulation.contactPhone && (
-                  <a
-                    href={`tel:${triageResult.technicianContactSimulation.contactPhone}`}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs uppercase cursor-pointer transition-colors shadow-2xs self-start sm:self-auto"
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={`text-[10px] font-bold px-2 py-0.5 border ${
+                      matchedTechnician.dailyAvailability === 'AVAILABLE_NOW'
+                        ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                        : 'bg-amber-100 text-amber-900 border-amber-300'
+                    }`}
                   >
-                    <PhoneCall className="w-3.5 h-3.5" />
-                    <span>{triageResult.technicianContactSimulation.contactPhone}</span>
-                  </a>
-                )}
+                    {matchedTechnician.dailyAvailability === 'AVAILABLE_NOW'
+                      ? language === 'hi'
+                        ? '● तत्काल उपलब्ध'
+                        : '● Available Now'
+                      : language === 'hi'
+                        ? '● कॉल पर व्यस्त'
+                        : '● Busy on Call'}
+                  </span>
+                  <span className="text-[10px] font-mono font-bold bg-white text-emerald-900 border border-emerald-300 px-1.5 py-0.5">
+                    ID: {matchedTechnician.id}
+                  </span>
+                </div>
               </div>
+
+              {/* Technician Profile Row */}
+              <div className="bg-white p-3 border border-emerald-300 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h4 className="text-sm font-black text-slate-900">
+                      {matchedTechnician.name}
+                    </h4>
+                    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 bg-amber-50 border border-amber-300 text-amber-900 text-[10px] font-bold">
+                      <Star className="w-3 h-3 fill-amber-500 text-amber-500" />
+                      <span>{matchedTechnician.rating.toFixed(1)}</span>
+                    </span>
+                    <span className="px-1.5 py-0.2 bg-slate-100 border border-slate-300 text-slate-700 text-[10px] font-bold">
+                      {matchedTechnician.experienceYears}{' '}
+                      {language === 'hi' ? 'वर्ष अनुभव' : 'Years Exp'}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="font-bold text-[#0B2545]">
+                      {language === 'hi' ? matchedTechnician.tradeHindi : TRADE_META[matchedTechnician.trade]?.en}
+                    </span>
+                    <span className="text-slate-400">&bull;</span>
+                    <span className="text-slate-600 font-mono text-[11px] flex items-center gap-1">
+                      <MapPin className="w-3 h-3 text-slate-500" />
+                      <span>
+                        {matchedTechnician.panchayatName} GP, {matchedTechnician.blockName} Block ({matchedTechnician.districtName})
+                      </span>
+                    </span>
+                  </div>
+
+                  {/* Verification Badge Chip */}
+                  <div className="pt-1 flex flex-wrap items-center gap-1.5">
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 border border-emerald-400 text-emerald-950 text-[10px] font-extrabold uppercase">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-700" />
+                      <span>
+                        {language === 'hi'
+                          ? `✓ पंचायत सत्यापित (LGD ब्लॉक: ${matchedTechnician.blockName})`
+                          : `✓ Panchayat Verified (LGD Block: ${matchedTechnician.blockName})`}
+                      </span>
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-medium">
+                      {TRADE_META[matchedTechnician.trade]?.defaultEquipment}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Call Simulation Button */}
+                <div className="flex flex-col sm:flex-row md:flex-col gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleSimulateCall(matchedTechnician)}
+                    className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white font-extrabold text-xs uppercase tracking-wider rounded-none shadow-2xs transition-colors cursor-pointer"
+                  >
+                    <PhoneCall className="w-3.5 h-3.5 text-amber-300" />
+                    <span>
+                      {language === 'hi'
+                        ? 'संपर्क करें (कॉल सिम्युलेशन)'
+                        : 'Connect via Dispatch Bridge'}
+                    </span>
+                  </button>
+                  <span className="text-[10px] font-mono text-center text-slate-500">
+                    Contact: {matchedTechnician.maskedContact}
+                  </span>
+                </div>
+              </div>
+
+              {/* Simulated Non-Blocking Notification Toast/Banner */}
+              {callDispatchNotice && (
+                <div className="p-2.5 bg-[#0B2545] border-l-4 border-amber-400 text-white text-xs flex items-start justify-between gap-2 shadow-2xs animate-fade-in">
+                  <div className="flex items-start gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-bold text-[#F8E7A2] text-xs">
+                        {language === 'hi'
+                          ? 'ग्रामीण आजीविका डिस्पैच कॉल कनेक्ट किया गया'
+                          : 'Rural Livelihood Dispatch Bridge Connected'}
+                      </div>
+                      <p className="text-[11px] text-slate-200 mt-0.5">
+                        {callDispatchNotice.message}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCallDispatchNotice(null)}
+                    className="text-slate-400 hover:text-white text-xs font-bold px-1.5 cursor-pointer"
+                    aria-label="Dismiss notification"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -353,3 +542,5 @@ export const CivicFirstAidTriageCard: React.FC<CivicFirstAidTriageCardProps> = (
     </div>
   );
 };
+
+export default CivicFirstAidTriageCard;

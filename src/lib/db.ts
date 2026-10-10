@@ -42,6 +42,25 @@ import {
 
 export type { ClusterEvaluationResult };
 
+export type EngineeringShortcoming =
+  | 'FILTRATION_CLOGGING'
+  | 'COST_OVERRUN'
+  | 'OFF_GRID_POWER_FAILURE'
+  | 'MATERIAL_DEGRADATION'
+  | string;
+
+export interface InnovationGapBenchmark {
+  id: string;
+  briefId: string;
+  shortcoming: EngineeringShortcoming;
+  proposedFix: string;
+  targetDelta: string;
+  bomCostDeltaInr: number;
+  authorTeam?: string;
+  authorCollege?: string;
+  createdAt: string;
+}
+
 /**
  * Custom error classes for fine-grained client-side storage diagnostics
  */
@@ -79,6 +98,7 @@ export class UdbhavDatabase extends Dexie {
   escrowGrants!: Table<EscrowGrant, string>;
   safetyValidations!: Table<SafetyValidation, string>;
   districtGISMetrics!: Table<DistrictGISSummary, number>;
+  gapBenchmarks!: Table<InnovationGapBenchmark, string>;
 
   get projectTeams(): Table<StudentTeam, string> {
     return this.studentTeams;
@@ -110,6 +130,11 @@ export class UdbhavDatabase extends Dexie {
       escrowGrants: 'id, masterIssueId, teamId, sponsorId, mcaScheduleVIICategory',
       safetyValidations: 'id, masterIssueId, teamId, isPublicPilotCleared',
       districtGISMetrics: 'districtCode, distressIntensityLevel',
+    });
+
+    // Schema version 4 (Sprint 8 - Task 8.4: Open Innovation & Gap Benchmarking)
+    this.version(4).stores({
+      gapBenchmarks: 'id, briefId, shortcoming, createdAt',
     });
   }
 }
@@ -2227,4 +2252,77 @@ export async function saveDistrictGISSummary(summary: DistrictGISSummary): Promi
     return handleStorageError(error, 'saveDistrictGISSummary');
   }
 }
+
+/**
+ * Saves a new 2nd-generation gap benchmark to IndexedDB.
+ */
+export async function saveGapBenchmark(benchmark: InnovationGapBenchmark): Promise<string> {
+  try {
+    await db.gapBenchmarks.put(benchmark);
+    return benchmark.id;
+  } catch (error) {
+    return handleStorageError(error, 'saveGapBenchmark');
+  }
+}
+
+/**
+ * Retrieves all documented gap benchmarks for a problem brief (or all briefs).
+ * Automatically seeds initial historical benchmarks for standard briefs if empty.
+ */
+export async function getGapBenchmarks(briefId?: string): Promise<InnovationGapBenchmark[]> {
+  try {
+    if (briefId) {
+      const records = await db.gapBenchmarks
+        .where('briefId')
+        .equals(briefId)
+        .reverse()
+        .sortBy('createdAt');
+
+      if (records.length > 0) {
+        return records;
+      }
+
+      // Seed initial realistic benchmarks for demonstration/academic analysis if none exist
+      if (briefId === 'BRIEF-JH-2026-001') {
+        const seeded: InnovationGapBenchmark[] = [
+          {
+            id: 'GAP-JH-2026-001-A',
+            briefId: 'BRIEF-JH-2026-001',
+            shortcoming: 'FILTRATION_CLOGGING',
+            proposedFix:
+              'Integrated dual cyclonic pre-settling chamber upstream of the sand bed to remove >85% ferruginous silt before media ingress.',
+            targetDelta:
+              'Reduces media backwash frequency from 14 days to >90 days without active booster pumps.',
+            bomCostDeltaInr: -450,
+            authorTeam: 'Team Jal-Drishti',
+            authorCollege: 'BIT Sindri',
+            createdAt: '2026-03-12T10:30:00.000Z',
+          },
+          {
+            id: 'GAP-JH-2026-001-B',
+            briefId: 'BRIEF-JH-2026-001',
+            shortcoming: 'COST_OVERRUN',
+            proposedFix:
+              'Replaced brass gate valves with standardized locally molded food-grade PVC ball valves and terracotta baffle plates.',
+            targetDelta:
+              'Brings total unit BOM from ₹3,400 down to ₹2,350 (strictly below ₹2,500 statutory cap).',
+            bomCostDeltaInr: -1050,
+            authorTeam: 'Aqua Tech Solvers',
+            authorCollege: 'NIT Jamshedpur',
+            createdAt: '2026-03-18T14:15:00.000Z',
+          },
+        ];
+        await db.gapBenchmarks.bulkPut(seeded);
+        return seeded;
+      }
+
+      return [];
+    }
+
+    return await db.gapBenchmarks.orderBy('createdAt').reverse().toArray();
+  } catch (error) {
+    return handleStorageError(error, 'getGapBenchmarks');
+  }
+}
+
 

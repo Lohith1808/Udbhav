@@ -36,6 +36,12 @@ const TeamAssemblyModal = React.lazy(
 const PanchayatQueryModal = React.lazy(
   () => import('./features/solver/components/PanchayatQueryModal')
 );
+const MaskedCitizenQueryModal = React.lazy(
+  () => import('./features/solver/components/MaskedCitizenQueryModal')
+);
+const OpenInnovationRepoModal = React.lazy(
+  () => import('./features/solver/components/OpenInnovationRepoModal')
+);
 const FacultyMatchmakerModal = React.lazy(
   () => import('./features/mentor/components/FacultyMatchmakerModal')
 );
@@ -51,6 +57,9 @@ const PanchayatEndorsementModal = React.lazy(
 const CSREscrowDashboard = React.lazy(
   () => import('./features/governance/components/CSREscrowDashboard')
 );
+const StatutoryComplianceReportModal = React.lazy(
+  () => import('./features/governance/components/StatutoryComplianceReportModal')
+);
 const StateGISCommandDashboard = React.lazy(
   () => import('./features/governance/components/StateGISCommandDashboard')
 );
@@ -63,6 +72,10 @@ import { GovtFooter } from './components/common/GovtFooter';
 import { LiveCameraCapture } from './features/ingestion/components/LiveCameraCapture';
 import { LGDGeoTagger } from './features/ingestion/components/LGDGeoTagger';
 import { AudioVoiceRecorder } from './features/ingestion/components/AudioVoiceRecorder';
+import {
+  SpeechToTextControl,
+  isSpeechRecognitionSupported,
+} from './features/ingestion/components/SpeechToTextControl';
 import { initAutoSyncListener } from './utils/syncWorker';
 import { SessionProvider, useSession } from './context/SessionContext';
 import { generateLLMProblemBoundaryBrief } from './services/aiService';
@@ -110,6 +123,8 @@ import {
   MessageSquare,
   GraduationCap,
   Coins,
+  PhoneCall,
+  FolderOpen,
 } from 'lucide-react';
 
 /**
@@ -236,6 +251,50 @@ const AppContent: React.FC = () => {
   const [capturedAudioBlob, setCapturedAudioBlob] = useState<Blob | null>(null);
   const [capturedAudioDuration, setCapturedAudioDuration] = useState<number>(0);
 
+  // Speech-to-Text Ingestion State & Integration (Sprint 8 - Task 8.1)
+  const [dictationMode, setDictationMode] = useState<'append' | 'replace'>('append');
+  const [speechLanguage, setSpeechLanguage] = useState<'hi' | 'en'>(language);
+  const [isDictating, setIsDictating] = useState<boolean>(false);
+  const [speechSessionKey, setSpeechSessionKey] = useState<number>(0);
+
+  // Synchronize speechLanguage with portal language selection
+  useEffect(() => {
+    setSpeechLanguage(language);
+  }, [language]);
+
+  const handleSpeechTranscript = (recognizedText: string) => {
+    if (!recognizedText.trim()) return;
+    setVernacularText((prev) => {
+      if (dictationMode === 'replace') {
+        return recognizedText.trim();
+      }
+      const existing = prev.trim();
+      return existing ? `${existing} ${recognizedText.trim()}` : recognizedText.trim();
+    });
+  };
+
+  const handleClearTranscript = () => {
+    setVernacularText('');
+  };
+
+  const handleResetForm = () => {
+    setVernacularText('');
+    setCapturedPhotoBlob(null);
+    setCapturedPhotoPreviewUrl(null);
+    setCapturedAudioBlob(null);
+    setCapturedAudioDuration(0);
+    setSpeechSessionKey((prev) => prev + 1);
+    setIsDictating(false);
+    setStatusNotification({
+      text:
+        language === 'hi'
+          ? 'फॉर्म और ध्वनि पहचान सत्र सफलतापूर्वक रीसेट किए गए।'
+          : 'Form and voice recognition session successfully reset.',
+      type: 'info',
+    });
+    setTimeout(() => setStatusNotification(null), 3000);
+  };
+
   // Inspector state for 6-stage lifecycle progress tracker (Task 1.4)
   const [selectedTicketForTracker, setSelectedTicketForTracker] = useState<OfflineDraftSubmission | null>(null);
 
@@ -254,9 +313,14 @@ const AppContent: React.FC = () => {
   const [isSavingBrief, setIsSavingBrief] = useState<boolean>(false);
   const [briefSectorFilter, setBriefSectorFilter] = useState<string>('ALL');
 
-  // State for Multidisciplinary Teaming & Panchayat Queries (Task 2.3)
+  // State for Multidisciplinary Teaming & Panchayat Queries (Task 2.3 & Task 8.3)
   const [selectedBriefForTeam, setSelectedBriefForTeam] = useState<EngineeringProblemBrief | null>(null);
   const [selectedBriefForQuery, setSelectedBriefForQuery] = useState<EngineeringProblemBrief | null>(null);
+  const [selectedBriefForCitizenQuery, setSelectedBriefForCitizenQuery] = useState<EngineeringProblemBrief | null>(null);
+  const [selectedBriefForInnovationRepo, setSelectedBriefForInnovationRepo] = useState<EngineeringProblemBrief | null>(null);
+  const [selectedGrantForComplianceReport, setSelectedGrantForComplianceReport] = useState<string | null>(null);
+
+
 
   // State for Faculty 70/30 Matchmaker (Task 2.4)
   const [selectedTeamForMentor, setSelectedTeamForMentor] = useState<{
@@ -685,11 +749,14 @@ const AppContent: React.FC = () => {
         draft: newDraft,
       });
 
-      // Reset photo & audio states
+      // Reset photo, audio & speech recognition states
       setCapturedPhotoBlob(null);
       setCapturedPhotoPreviewUrl(null);
       setCapturedAudioBlob(null);
       setCapturedAudioDuration(0);
+      setVernacularText('');
+      setSpeechSessionKey((prev) => prev + 1);
+      setIsDictating(false);
 
       const clusterNotice = clusterResult.shouldMergeIntoMaster && clusterResult.targetMasterIssueId
         ? language === 'hi'
@@ -823,6 +890,57 @@ const AppContent: React.FC = () => {
     } finally {
       setIsSavingBrief(false);
     }
+  };
+
+  // Masked Citizen Clarification Inquiry Handler (Sprint 8 - Task 8.3)
+  const handleCitizenQuerySubmit = async (queryData: {
+    category: string;
+    questionText: string;
+    isUrgentCallback: boolean;
+  }) => {
+    if (!selectedBriefForCitizenQuery) return;
+
+    const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const queryId = `JH-MASKED-QUERY-2026-${randomSuffix}`;
+    const associatedTeam = (allTeams || []).find((t) => t.briefId === selectedBriefForCitizenQuery.id);
+
+    const newQuery: PanchayatTechnicalQuery = {
+      id: queryId,
+      teamId: associatedTeam?.id || 'TEAM-SOLVER-FIELD',
+      masterIssueId: selectedBriefForCitizenQuery.masterIssueId,
+      queryText: `[CITIZEN_PROXY - ${queryData.category}] ${queryData.questionText}${
+        queryData.isUrgentCallback ? ' (URGENT_VOICE_CALLBACK_REQUESTED)' : ''
+      }`,
+      status: 'PENDING_OFFICER',
+      createdAt: Date.now(),
+      senderMaskedToken: associatedTeam?.teamName || session.maskedIdentifier,
+      officerMaskedToken: `Citizen #${selectedBriefForCitizenQuery.masterIssueId.slice(-4).toUpperCase()}`,
+    };
+
+    await db.technicalQueries.put(newQuery);
+
+    centralSyncService.publish('RECORD_UPDATED', {
+      type: 'query',
+      id: queryId,
+      query: newQuery,
+      masterIssueId: selectedBriefForCitizenQuery.masterIssueId,
+    });
+
+    centralSyncService.publish('TECHNICAL_QUERY_POSTED', {
+      query: newQuery,
+      masterIssueId: selectedBriefForCitizenQuery.masterIssueId,
+      briefId: selectedBriefForCitizenQuery.id,
+      isCitizenProxy: true,
+    });
+
+    setStatusNotification({
+      text:
+        language === 'hi'
+          ? `नागरिक स्पष्टीकरण संदेश सफलतापूर्वक प्रेषित (${queryId})!`
+          : `Masked citizen clarification inquiry successfully dispatched (${queryId})!`,
+      type: 'success',
+    });
+    setTimeout(() => setStatusNotification(null), 4500);
   };
 
   // Batch sync action (Sprint 6 - Task 6.1: Cross-Device Synchronization)
@@ -1731,6 +1849,20 @@ const AppContent: React.FC = () => {
                               <div className="flex flex-wrap items-center gap-1.5">
                                 <button
                                   type="button"
+                                  onClick={() => setSelectedBriefForCitizenQuery(b)}
+                                  className="px-2.5 py-1.5 bg-[#1F4E5B] hover:bg-[#183E49] text-[#F8E7A2] text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer shadow-2xs"
+                                  title="Safe Masked Clarification Bridge to Grassroots Submitter"
+                                >
+                                  <PhoneCall className="w-3.5 h-3.5 text-amber-300" />
+                                  <span>
+                                    {language === 'hi'
+                                      ? 'नागरिक स्पष्टीकरण सेतु'
+                                      : 'Masked Citizen Inquiry'}
+                                  </span>
+                                </button>
+
+                                <button
+                                  type="button"
                                   onClick={() => setSelectedBriefForQuery(b)}
                                   className="px-2.5 py-1.5 bg-[#0B2545] hover:bg-[#1E3A5F] text-white text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer shadow-2xs"
                                   title="Open Panchayat Field Clarification Bridge"
@@ -1789,16 +1921,32 @@ const AppContent: React.FC = () => {
                             )}
                           </div>
 
-                          <button
-                            type="button"
-                            onClick={() => setSelectedBriefForView(b)}
-                            className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-800 text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer"
-                          >
-                            <ExternalLink className="w-3 h-3 text-slate-600" />
-                            <span>
-                              {language === 'hi' ? 'सीमा विनिर्देश' : 'Boundary Spec'}
-                            </span>
-                          </button>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedBriefForInnovationRepo(b)}
+                              className="px-2.5 py-1.5 bg-[#422006] hover:bg-[#2e1503] text-[#FDE68A] text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer shadow-2xs"
+                              title="Open Innovation Archive & 2nd-Gen Gap Benchmarks"
+                            >
+                              <FolderOpen className="w-3.5 h-3.5 text-amber-300" />
+                              <span>
+                                {language === 'hi'
+                                  ? 'मुक्त नवाचार भंडार'
+                                  : 'Innovation Archive & Gaps'}
+                              </span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => setSelectedBriefForView(b)}
+                              className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-800 text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <ExternalLink className="w-3 h-3 text-slate-600" />
+                              <span>
+                                {language === 'hi' ? 'सीमा विनिर्देश' : 'Boundary Spec'}
+                              </span>
+                            </button>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -1831,6 +1979,7 @@ const AppContent: React.FC = () => {
               userRole={simulatedRole}
               onRoleChange={setSimulatedRole}
               language={language}
+              onOpenComplianceReport={(gId) => setSelectedGrantForComplianceReport(gId)}
             />
           </React.Suspense>
         ) : activeNavTab === 'gis' ? (
@@ -1989,22 +2138,142 @@ const AppContent: React.FC = () => {
                   />
                 </div>
 
-                <div>
-                  <label className="block text-xs font-bold text-slate-800 mb-1 flex items-center justify-between">
-                    <span>
-                      {language === 'hi' ? 'नागरिक वक्तव्य / ट्रांसक्रिप्शन' : 'Vernacular Spoken Transcript'}
-                    </span>
-                    <span className="text-[10px] text-[#7A1B1B] font-bold flex items-center gap-1">
-                      <Mic className="w-3 h-3" />
-                      <span>{capturedAudioBlob ? 'Voice Memo Attached' : 'Voice Memo Pending'}</span>
-                    </span>
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={vernacularText}
-                    onChange={(e) => setVernacularText(e.target.value)}
-                    className="w-full text-xs p-2 border border-slate-400 bg-slate-50 rounded-none focus:outline-none font-sans"
+                {/* Speech-to-Text Vernacular Ingestion Control & Textarea (Sprint 8 - Task 8.1) */}
+                <div className="pt-2 border-t border-slate-200 space-y-2">
+                  {/* Bilingual Subtitle / Hint + Active Listening / Support Badges */}
+                  <div className="flex flex-wrap items-center justify-between gap-1.5">
+                    <div>
+                      <span className="block text-xs font-bold text-slate-800">
+                        {language === 'hi'
+                          ? 'बोलकर लिखें (हिंदी / English)'
+                          : 'Speak to dictate description'}
+                      </span>
+                      <span className="text-[11px] text-slate-500 font-normal">
+                        {language === 'hi'
+                          ? 'माइक्रोफ़ोन से बोलें या नीचे टेक्स्ट संपादित करें'
+                          : 'Dictate via microphone or edit manual text below'}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      {/* Active Listening Badge */}
+                      {isDictating ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-100 border border-red-300 text-red-900 text-[10px] font-extrabold uppercase animate-pulse">
+                          <span className="w-2 h-2 rounded-full bg-red-600" />
+                          <span>{language === 'hi' ? 'सक्रिय श्रवण' : 'Listening Active'}</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-slate-100 border border-slate-300 text-slate-600 text-[10px] font-bold uppercase">
+                          <Mic className="w-2.5 h-2.5 text-slate-500" />
+                          <span>{language === 'hi' ? 'माइक तैयार' : 'Mic Ready'}</span>
+                        </span>
+                      )}
+
+                      {/* Fallback badge when Web Speech API is unsupported in browser */}
+                      {!isSpeechRecognitionSupported() && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-100 border border-amber-400 text-amber-900 text-[10px] font-bold">
+                          <AlertTriangle className="w-2.5 h-2.5 text-amber-700 shrink-0" />
+                          <span>
+                            {language === 'hi'
+                              ? 'भाषण पहचान असमर्थित (ध्वनि रिकॉर्डिंग का उपयोग करें)'
+                              : 'Speech recognition not supported on this browser (use voice recording instead)'}
+                          </span>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Speech-to-Text Control mounted alongside voice recorder */}
+                  <SpeechToTextControl
+                    key={speechSessionKey}
+                    language={speechLanguage}
+                    onLanguageChange={(lang) => setSpeechLanguage(lang)}
+                    onListeningChange={(listening) => setIsDictating(listening)}
+                    onTranscript={handleSpeechTranscript}
+                    resetKey={speechSessionKey}
+                    className="border border-slate-300 bg-slate-50"
                   />
+
+                  {/* Description / Spoken Transcript Textarea & Controls */}
+                  <div>
+                    <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
+                      <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <span>
+                          {language === 'hi'
+                            ? 'नागरिक वक्तव्य / ट्रांसक्रिप्शन'
+                            : 'Vernacular Spoken Transcript'}
+                        </span>
+                        <span className="text-[10px] text-[#7A1B1B] font-bold flex items-center gap-1 ml-2">
+                          <Mic className="w-3 h-3" />
+                          <span>{capturedAudioBlob ? 'Voice Memo Attached' : 'Voice Memo Pending'}</span>
+                        </span>
+                      </label>
+
+                      {/* Dictation Mode (Append vs Replace) + Clear Text Button */}
+                      <div className="flex items-center gap-1.5">
+                        <div className="inline-flex items-center border border-slate-300 bg-white p-0.5 text-[10px]">
+                          <span className="px-1 font-semibold text-slate-500">
+                            {language === 'hi' ? 'मोड:' : 'Mode:'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setDictationMode('append')}
+                            className={`px-1.5 py-0.5 font-bold uppercase transition-colors cursor-pointer ${
+                              dictationMode === 'append'
+                                ? 'bg-[#0B2545] text-[#F8E7A2]'
+                                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                            }`}
+                            title="Append speech transcript to existing text"
+                          >
+                            {language === 'hi' ? 'जोड़ें (Append)' : 'Append'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDictationMode('replace')}
+                            className={`px-1.5 py-0.5 font-bold uppercase transition-colors cursor-pointer ${
+                              dictationMode === 'replace'
+                                ? 'bg-[#0B2545] text-[#F8E7A2]'
+                                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                            }`}
+                            title="Replace text with recognized speech"
+                          >
+                            {language === 'hi' ? 'बदलें (Replace)' : 'Replace'}
+                          </button>
+                        </div>
+
+                        {vernacularText && (
+                          <button
+                            type="button"
+                            onClick={handleClearTranscript}
+                            className="text-[10px] text-slate-600 hover:text-red-700 font-bold px-1.5 py-0.5 bg-slate-100 hover:bg-red-50 border border-slate-300 transition-colors cursor-pointer"
+                            title="Clear transcript text"
+                          >
+                            {language === 'hi' ? 'साफ़ करें' : 'Clear'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <textarea
+                      rows={3}
+                      value={vernacularText}
+                      onChange={(e) => setVernacularText(e.target.value)}
+                      placeholder={
+                        language === 'hi'
+                          ? 'बोलकर या टाइप करके समस्या का पूरा विवरण यहाँ लिखें...'
+                          : 'Speak or type the problem description details here...'
+                      }
+                      className="w-full text-xs p-2 border border-slate-400 bg-white focus:bg-amber-50/20 rounded-none focus:outline-none focus:border-[#0B2545] font-sans transition-colors"
+                    />
+                    <div className="flex items-center justify-between text-[10px] text-slate-500 mt-0.5">
+                      <span>
+                        {language === 'hi'
+                          ? 'मैन्युअल टाइपिंग और वॉइस डिक्टेशन दोनों समर्थित'
+                          : 'Both manual typing and voice dictation supported'}
+                      </span>
+                      <span>{vernacularText.length} characters</span>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Enforced Live Camera Capture & Canvas Downscaler (Task 1.2) */}
@@ -2037,6 +2306,7 @@ const AppContent: React.FC = () => {
                   category={issueCategory}
                   village={resolvedLgdLocation?.panchayatName || 'Ranchi'}
                   language={language}
+                  lgdLocation={resolvedLgdLocation || undefined}
                   onEscalateToRD={() => handleSaveToTerminal('QUEUED')}
                   onOpenAiSettings={() => setIsAiConfigOpen(true)}
                 />
@@ -2047,7 +2317,7 @@ const AppContent: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => handleSaveToTerminal('QUEUED')}
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2 bg-[#7A1B1B] hover:bg-[#631515] text-[#F8E7A2] text-xs font-bold uppercase tracking-wider rounded-none shadow-2xs transition-colors"
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2 bg-[#7A1B1B] hover:bg-[#631515] text-[#F8E7A2] text-xs font-bold uppercase tracking-wider rounded-none shadow-2xs transition-colors cursor-pointer"
                 >
                   <Send className="w-3.5 h-3.5" />
                   <span>
@@ -2058,10 +2328,20 @@ const AppContent: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => handleSaveToTerminal('DRAFT')}
-                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 border border-slate-400 text-slate-800 text-xs font-bold uppercase rounded-none transition-colors"
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 border border-slate-400 text-slate-800 text-xs font-bold uppercase rounded-none transition-colors cursor-pointer"
                 >
                   <FileText className="w-3.5 h-3.5 text-slate-600" />
                   <span>{language === 'hi' ? 'स्थानीय प्रारूप' : 'Local Draft'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResetForm}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-red-50 border border-slate-300 hover:border-red-400 text-slate-600 hover:text-red-700 text-xs font-bold uppercase rounded-none transition-colors cursor-pointer"
+                  title="Clear form and abort speech recognition"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{language === 'hi' ? 'रीसेट' : 'Reset'}</span>
                 </button>
               </div>
             </div>
@@ -2454,6 +2734,49 @@ const AppContent: React.FC = () => {
             team={(allTeams || []).find((t) => t.briefId === selectedBriefForQuery.id) || null}
             language={language}
             onClose={() => setSelectedBriefForQuery(null)}
+          />
+        </React.Suspense>
+      )}
+
+      {/* Masked Citizen Callback & Clarification Bridge Modal (Sprint 8 - Task 8.3) */}
+      {selectedBriefForCitizenQuery && (
+        <React.Suspense fallback={null}>
+          <MaskedCitizenQueryModal
+            isOpen={Boolean(selectedBriefForCitizenQuery)}
+            onClose={() => setSelectedBriefForCitizenQuery(null)}
+            issueId={selectedBriefForCitizenQuery.masterIssueId}
+            maskedCitizenToken={`Citizen #${selectedBriefForCitizenQuery.masterIssueId.slice(-4).toUpperCase()}`}
+            locationContext={{
+              district: selectedBriefForCitizenQuery.fieldEvidenceSummary.district || 'Ranchi',
+              block: selectedBriefForCitizenQuery.fieldEvidenceSummary.block || 'Kanke',
+              panchayat: selectedBriefForCitizenQuery.title.split(' ')[0] || 'Arsande',
+            }}
+            onSubmitQuery={handleCitizenQuerySubmit}
+          />
+        </React.Suspense>
+      )}
+
+      {/* Open-Source Innovation Repository & Gap Benchmarking Modal (Sprint 8 - Task 8.4) */}
+      {selectedBriefForInnovationRepo && (
+        <React.Suspense fallback={null}>
+          <OpenInnovationRepoModal
+            isOpen={Boolean(selectedBriefForInnovationRepo)}
+            onClose={() => setSelectedBriefForInnovationRepo(null)}
+            briefId={selectedBriefForInnovationRepo.id}
+            briefTitle={selectedBriefForInnovationRepo.title}
+            domainSector={selectedBriefForInnovationRepo.domainSector}
+            targetDistrict={selectedBriefForInnovationRepo.fieldEvidenceSummary?.district || 'Ranchi'}
+          />
+        </React.Suspense>
+      )}
+
+      {/* Statutory Compliance PDF/Print Report Modal (Sprint 8 - Task 8.5) */}
+      {selectedGrantForComplianceReport && (
+        <React.Suspense fallback={null}>
+          <StatutoryComplianceReportModal
+            isOpen={Boolean(selectedGrantForComplianceReport)}
+            onClose={() => setSelectedGrantForComplianceReport(null)}
+            grantId={selectedGrantForComplianceReport}
           />
         </React.Suspense>
       )}

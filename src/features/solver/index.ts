@@ -7,3 +7,7 @@ export * from './utils/boundaryGenerator';
 export * from './components/ProblemBriefModal';
 export * from './components/TeamAssemblyModal';
 export * from './components/PanchayatQueryModal';
+export * from './components/MaskedCitizenQueryModal';
+export * from './components/SolverChallengeBoard';
+export * from './components/OpenInnovationRepoModal';
+

@@ -12,3 +12,5 @@ export * from './components/TwoTierSafetyGateModal';
 export * from './components/StatewideGISCommandDashboard';
 export * from './components/StateGISCommandDashboard';
 export * from './components/GemProcurementBridgeModal';
+export * from './components/StatutoryComplianceReportModal';
+

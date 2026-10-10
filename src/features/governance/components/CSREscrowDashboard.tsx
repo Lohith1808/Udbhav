@@ -24,6 +24,7 @@ import {
   FileText,
   FlaskConical,
   Award,
+  Printer,
 } from 'lucide-react';
 import { EscrowGrant, MilestoneTranche, SafetyValidation } from '../../../types/governance';
 import { StudentTeam, EngineeringProblemBrief } from '../../../types/solver';
@@ -37,6 +38,7 @@ import { centralSyncService } from '../../../services/centralSyncService';
 import { TrancheReleaseModal } from './TrancheReleaseModal';
 import { StatutoryCSRAuditModal } from './StatutoryCSRAuditModal';
 import { TwoTierSafetyGateModal } from './TwoTierSafetyGateModal';
+import { StatutoryComplianceReportModal } from './StatutoryComplianceReportModal';
 
 export type CSREscrowRole = 'FACULTY_MENTOR' | 'GOVT_ADMIN' | 'INDUSTRY_CSR' | 'ACCREDITED_EVALUATOR';
 
@@ -44,6 +46,7 @@ export interface CSREscrowDashboardProps {
   userRole?: CSREscrowRole;
   onRoleChange?: (role: CSREscrowRole) => void;
   language?: 'en' | 'hi';
+  onOpenComplianceReport?: (grantId: string) => void;
 }
 
 const MCA_LABELS: Record<string, string> = {
@@ -66,6 +69,7 @@ export const CSREscrowDashboard: React.FC<CSREscrowDashboardProps> = ({
   userRole: propUserRole,
   onRoleChange,
   language = 'en',
+  onOpenComplianceReport,
 }) => {
   const [internalRole, setInternalRole] = useState<CSREscrowRole>(
     propUserRole || 'INDUSTRY_CSR'
@@ -90,6 +94,8 @@ export const CSREscrowDashboard: React.FC<CSREscrowDashboardProps> = ({
   const [selectedTranche, setSelectedTranche] = useState<MilestoneTranche | null>(null);
   const [dossierGrant, setDossierGrant] = useState<EscrowGrant | null>(null);
   const [selectedSafetyVal, setSelectedSafetyVal] = useState<SafetyValidation | null>(null);
+  const [complianceReportGrantId, setComplianceReportGrantId] = useState<string | null>(null);
+
 
   const loadData = async () => {
     try {
@@ -563,6 +569,23 @@ export const CSREscrowDashboard: React.FC<CSREscrowDashboardProps> = ({
                         ) : null;
                       })()}
 
+                      {/* Task 8.5: Statutory Compliance Report Print Packet Trigger */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (onOpenComplianceReport) {
+                            onOpenComplianceReport(grant.id);
+                          } else {
+                            setComplianceReportGrantId(grant.id);
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-[#0B2545] hover:bg-[#1E3A5F] text-[#F8E7A2] text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+                        title="Open Printable MCA Form CSR-2 & Form GFR-12A Statutory Compliance Report"
+                      >
+                        <Printer className="w-3.5 h-3.5 text-amber-300" />
+                        <span>📄 MCA Form CSR-2 &amp; GFR-12A वैधानिक रिपोर्ट</span>
+                      </button>
+
                       <button
                         type="button"
                         onClick={() => setDossierGrant(grant)}
@@ -766,6 +789,17 @@ export const CSREscrowDashboard: React.FC<CSREscrowDashboardProps> = ({
           onValidationUpdated={loadData}
           userRole={activeRole === 'INDUSTRY_CSR' ? 'GOVT_ADMIN' : activeRole}
           language={language}
+        />
+      )}
+
+      {/* ==================================================================== */}
+      {/* 8. MODAL: STATUTORY COMPLIANCE REPORT PRINT PACKET (TASK 8.5) */}
+      {/* ==================================================================== */}
+      {complianceReportGrantId && (
+        <StatutoryComplianceReportModal
+          isOpen={Boolean(complianceReportGrantId)}
+          onClose={() => setComplianceReportGrantId(null)}
+          grantId={complianceReportGrantId}
         />
       )}
     </section>

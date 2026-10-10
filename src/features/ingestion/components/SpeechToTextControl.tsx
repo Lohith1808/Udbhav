@@ -32,6 +32,12 @@ export interface SpeechToTextControlProps {
   onTranscript: (text: string) => void;
   /** Portal-wide UI language; mapped to a BCP-47 recognition tag. */
   language?: 'hi' | 'en';
+  /** Optional callback fired when user toggles recognition language inside control */
+  onLanguageChange?: (lang: 'hi' | 'en') => void;
+  /** Optional callback fired when speech recognition listening state changes */
+  onListeningChange?: (isListening: boolean) => void;
+  /** Optional reset trigger to abort active recognition session */
+  resetKey?: number | string;
   className?: string;
 }
 
@@ -64,8 +70,12 @@ export const isSpeechRecognitionSupported = (): boolean => getRecognitionConstru
 export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
   onTranscript,
   language = 'en',
+  onLanguageChange,
+  onListeningChange,
+  resetKey,
   className = '',
 }) => {
+  const [internalLang, setInternalLang] = useState<'hi' | 'en'>(language);
   const [state, setState] = useState<SpeechState>('idle');
   const [interimTranscript, setInterimTranscript] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -78,8 +88,19 @@ export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
   /** Guards against overlapping start() calls (duplicate sessions). */
   const startingRef = useRef<boolean>(false);
 
-  const langTag = UI_LANGUAGE_TO_BCP47[language] ?? 'hi-IN';
+  // Sync internal language if parent language prop changes
+  useEffect(() => {
+    setInternalLang(language);
+  }, [language]);
+
+  const activeLang = internalLang;
+  const langTag = UI_LANGUAGE_TO_BCP47[activeLang] ?? 'hi-IN';
   const isSupported = isSpeechRecognitionSupported();
+
+  // Notify parent of listening state
+  useEffect(() => {
+    onListeningChange?.(state === 'listening');
+  }, [state, onListeningChange]);
 
   // Track mount status so async callbacks never setState after unmount
   useEffect(() => {
@@ -109,6 +130,19 @@ export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
     }
   }, []);
 
+  // Abort any active recognition when resetKey changes
+  useEffect(() => {
+    if (resetKey !== undefined) {
+      shouldListenRef.current = false;
+      teardownRecognition();
+      if (isMountedRef.current) {
+        setState('idle');
+        setInterimTranscript('');
+        setErrorMessage(null);
+      }
+    }
+  }, [resetKey, teardownRecognition]);
+
   // Abort any active recognition when the component unmounts
   useEffect(() => {
     return () => {
@@ -119,7 +153,7 @@ export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
 
   const buildErrorMessage = useCallback(
     (code: string): string => {
-      const hi = language === 'hi';
+      const hi = activeLang === 'hi';
       switch (code) {
         case 'not-allowed':
         case 'service-not-allowed':
@@ -146,7 +180,7 @@ export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
             : 'A speech recognition error occurred. Please try again.';
       }
     },
-    [language]
+    [activeLang]
   );
 
   const handleError = useCallback(
@@ -210,7 +244,7 @@ export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
     if (!isSupported) {
       setState('error');
       setErrorMessage(
-        language === 'hi'
+        activeLang === 'hi'
           ? 'इस ब्राउज़र में भाषण पहचान समर्थित नहीं है। कृपया Chrome या Edge उपयोग करें।'
           : 'Speech recognition is not supported in this browser. Please use Chrome or Edge.'
       );
@@ -254,7 +288,7 @@ export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
     } finally {
       startingRef.current = false;
     }
-  }, [isSupported, langTag, language, clearErrorMessage, handleResult, handleError, handleEnd, buildErrorMessage]);
+  }, [isSupported, langTag, activeLang, clearErrorMessage, handleResult, handleError, handleEnd, buildErrorMessage]);
 
   const stopListening = useCallback(() => {
     shouldListenRef.current = false;
@@ -272,6 +306,15 @@ export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
     }
   }, [teardownRecognition]);
 
+  const handleLanguageSelect = (newLang: 'hi' | 'en') => {
+    if (newLang === internalLang) return;
+    setInternalLang(newLang);
+    onLanguageChange?.(newLang);
+    if (recognitionRef.current) {
+      recognitionRef.current.lang = UI_LANGUAGE_TO_BCP47[newLang] ?? 'hi-IN';
+    }
+  };
+
   const handleRetry = useCallback(() => {
     clearErrorMessage();
     setInterimTranscript('');
@@ -280,30 +323,53 @@ export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
 
   const stateLabel =
     state === 'listening'
-      ? language === 'hi'
+      ? activeLang === 'hi'
         ? 'सुन रहे हैं... बोलिए'
         : 'Listening... speak now'
       : state === 'processing'
-      ? language === 'hi'
+      ? activeLang === 'hi'
         ? 'प्रोसेस हो रहा है...'
         : 'Processing...'
-      : language === 'hi'
+      : activeLang === 'hi'
       ? 'बोलकर लिखें'
-      : 'Speak to write';
+      : 'Speak to dictate';
 
   return (
     <div className={`border border-slate-300 bg-slate-50 p-3 sm:p-4 rounded-none select-none ${className}`}>
-      {/* Unsupported browser notice */}
+      {/* Unsupported browser fallback badge */}
       {!isSupported && (
-        <div className="p-2.5 bg-amber-100 border-l-4 border-amber-600 text-amber-950 text-xs flex items-center gap-2">
+        <div className="p-2.5 bg-amber-100 border-l-4 border-amber-600 text-amber-950 text-xs flex items-center gap-2 mb-2">
           <AlertCircle className="w-4 h-4 text-amber-700 shrink-0" />
-          <span>
-            {language === 'hi'
-              ? 'इस ब्राउज़र में भाषण पहचान (Speech-to-Text) समर्थित नहीं है। कृपया Chrome या Edge में खोलें। आप नीचे मैन्युअल रूप से टाइप कर सकते हैं।'
-              : 'Speech-to-Text is not supported in this browser. Please open this portal in Chrome or Edge. You can still type the description manually below.'}
+          <span className="font-semibold">
+            {activeLang === 'hi'
+              ? 'इस ब्राउज़र में भाषण पहचान समर्थित नहीं है (इसके बजाय ध्वनि रिकॉर्डिंग का उपयोग करें)'
+              : 'Speech recognition not supported on this browser (use voice recording instead)'}
           </span>
         </div>
       )}
+
+      {/* Language Switcher Bar */}
+      <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-slate-200">
+        <span className="text-[11px] font-bold text-slate-700 uppercase">
+          {activeLang === 'hi' ? 'पहचान भाषा' : 'Speech Language'}:
+        </span>
+        <div className="inline-flex rounded-none border border-slate-300 bg-white p-0.5">
+          {SPEECH_LANGUAGE_OPTIONS.map((opt) => (
+            <button
+              key={opt.ui}
+              type="button"
+              onClick={() => handleLanguageSelect(opt.ui)}
+              className={`px-2 py-0.5 text-[10px] font-bold uppercase transition-colors cursor-pointer ${
+                activeLang === opt.ui
+                  ? 'bg-[#0B2545] text-[#F8E7A2]'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {/* Idle / Error state: push-to-talk button */}
       {state !== 'listening' && state !== 'processing' && (
@@ -314,7 +380,7 @@ export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
               onClick={() => void startListening()}
               disabled={!isSupported}
               className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#0B2545] hover:bg-slate-800 active:bg-slate-900 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-bold uppercase tracking-wider rounded-none transition-colors cursor-pointer"
-              aria-label={language === 'hi' ? 'बोलकर समस्या विवरण लिखें' : 'Dictate the issue description by voice'}
+              aria-label={activeLang === 'hi' ? 'बोलकर समस्या विवरण लिखें' : 'Dictate the issue description by voice'}
             >
               <Mic className="w-4 h-4 text-amber-300" aria-hidden="true" />
               <span>{stateLabel}</span>
@@ -326,16 +392,16 @@ export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
                 className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 bg-[#7A1B1B] hover:bg-[#631515] text-[#F8E7A2] text-xs font-bold uppercase tracking-wider rounded-none transition-colors cursor-pointer"
               >
                 <RefreshCw className="w-4 h-4" aria-hidden="true" />
-                <span>{language === 'hi' ? 'पुनः प्रयास' : 'Retry'}</span>
+                <span>{activeLang === 'hi' ? 'पुनः प्रयास' : 'Retry'}</span>
               </button>
             )}
           </div>
           <p className="text-[11px] text-slate-500 flex items-center gap-1.5">
             <Radio className="w-3.5 h-3.5 text-emerald-700" aria-hidden="true" />
             <span>
-              {language === 'hi'
-                ? `माइक्रोफ़ोन अनुमति ब्राउज़र द्वारा मांगी जाएगी • भाषा: हिंदी (hi-IN) • समर्थन ब्राउज़र सेवा पर निर्भर`
-                : `Microphone permission is requested by the browser • Language: English (en-IN) • Support depends on the browser speech service`}
+              {activeLang === 'hi'
+                ? `माइक्रोफ़ोन अनुमति ब्राउज़र द्वारा मांगी जाएगी • भाषा: हिंदी (${langTag})`
+                : `Microphone permission is requested by the browser • Language: English (${langTag})`}
             </span>
           </p>
         </div>
@@ -360,7 +426,7 @@ export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
             aria-live="polite"
           >
             {interimTranscript ||
-              (language === 'hi'
+              (activeLang === 'hi'
                 ? 'आपकी बात यहां लाइव दिखेगी...'
                 : 'Your words will appear here as you speak...')}
           </div>
@@ -371,7 +437,7 @@ export const SpeechToTextControl: React.FC<SpeechToTextControlProps> = ({
             className="w-full py-2.5 px-4 bg-red-700 hover:bg-red-800 active:bg-red-900 text-white text-xs font-extrabold uppercase tracking-wider rounded-none flex items-center justify-center gap-2 shadow-2xs transition-colors cursor-pointer"
           >
             <Square className="w-4 h-4 fill-white" aria-hidden="true" />
-            <span>{language === 'hi' ? 'रोकें (Stop)' : 'Stop Listening'}</span>
+            <span>{activeLang === 'hi' ? 'रोकें (Stop)' : 'Stop Listening'}</span>
           </button>
         </div>
       )}
