@@ -10,3 +10,5 @@ export * from './components/CSREscrowDashboard';
 export * from './components/StatutoryCSRAuditModal';
 export * from './components/TwoTierSafetyGateModal';
 export * from './components/StatewideGISCommandDashboard';
+export * from './components/StateGISCommandDashboard';
+export * from './components/GemProcurementBridgeModal';

@@ -38,6 +38,7 @@ import {
   MilestoneNumber,
   EngineeringProblemBrief,
 } from '../../../types/solver';
+import { SafetyValidation } from '../../../types/governance';
 import {
   db,
   getFacultyMentors,
@@ -45,11 +46,17 @@ import {
   declineTeamMentorship,
   autoRerouteTeamMentorship,
   advanceTeamMilestone,
+  getSafetyValidation,
+  getSafetyValidationByMasterIssueId,
 } from '../../../lib/db';
 import { useSession } from '../../../context/SessionContext';
 import { centralSyncService } from '../../../services/centralSyncService';
 import { ContributionTelemetryModal } from './ContributionTelemetryModal';
 import { NaacDossierModal } from './NaacDossierModal';
+
+const TwoTierSafetyGateModal = React.lazy(
+  () => import('../../governance/components/TwoTierSafetyGateModal')
+);
 
 export interface FacultyMentorDashboardProps {
   language?: 'en' | 'hi';
@@ -102,6 +109,7 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
   const [selectedTeamForTelemetry, setSelectedTeamForTelemetry] = useState<StudentTeam | null>(null);
   const [selectedTeamForDossier, setSelectedTeamForDossier] = useState<StudentTeam | null>(null);
   const [showNaacDossier, setShowNaacDossier] = useState<boolean>(false);
+  const [selectedSafetyVal, setSelectedSafetyVal] = useState<SafetyValidation | null>(null);
 
   const loadData = async () => {
     try {
@@ -902,6 +910,32 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
                           <FileText className="w-3.5 h-3.5 text-[#7A1B1B]" />
                           <span>Export NAAC Dossier</span>
                         </button>
+
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const targetBrief = getBriefForTeam(team.briefId);
+                            const safety =
+                              (await getSafetyValidation(team.id)) ||
+                              (await getSafetyValidationByMasterIssueId(targetBrief?.masterIssueId || '')) ||
+                              {
+                                id: `SAFE-JH-2026-${team.id.slice(-3).toUpperCase()}`,
+                                masterIssueId: targetBrief?.masterIssueId || `JH-2026-M-${team.id}`,
+                                teamId: team.id,
+                                tier1FacultyPassed: false,
+                                tier2EvaluatorAgency: 'CSIR_CIMFR_DHANBAD',
+                                tier2BisPassed: false,
+                                tier2BisStandardCode: 'IS 10500:2012 Drinking Water Specification',
+                                isPublicPilotCleared: false,
+                              };
+                            setSelectedSafetyVal(safety);
+                          }}
+                          className="px-2.5 py-1.5 bg-[#1E6F50]/10 hover:bg-[#1E6F50]/20 text-[#1E6F50] border border-[#1E6F50]/30 text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                          title="Sign Tier 1 Lab Telemetry & Inspect Field Pilot Clearance Pass"
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5 text-[#1E6F50]" />
+                          <span>Safety Gate &amp; Pilot Pass</span>
+                        </button>
                       </div>
 
                       <div className="flex items-center gap-2">
@@ -954,6 +988,20 @@ export const FacultyMentorDashboard: React.FC<FacultyMentorDashboardProps> = ({
             setSelectedTeamForDossier(null);
           }}
         />
+      )}
+
+      {/* Two-Tier Technical Validation & Field Safety Gate Modal (Task 7.2) */}
+      {selectedSafetyVal && (
+        <React.Suspense fallback={null}>
+          <TwoTierSafetyGateModal
+            isOpen={Boolean(selectedSafetyVal)}
+            onClose={() => setSelectedSafetyVal(null)}
+            safetyValidation={selectedSafetyVal}
+            onValidationUpdated={loadData}
+            userRole="FACULTY_MENTOR"
+            language={language}
+          />
+        </React.Suspense>
       )}
     </section>
   );

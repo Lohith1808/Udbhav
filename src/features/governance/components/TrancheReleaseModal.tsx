@@ -82,7 +82,13 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
   // Tranche 2 telemetry proof URL state
   const [telemetryUrl, setTelemetryUrl] = useState<string>(
     initialTranche.deliverableProofUrl ||
+      initialTranche.telemetryUrl ||
       'https://udbhav.jharkhand.gov.in/proofs/bit-sindri-lab-telemetry.pdf'
+  );
+
+  // Tranche 3 handover notes state
+  const [handoverNotes, setHandoverNotes] = useState<string>(
+    initialTranche.handoverNotes || ''
   );
 
   // Industry CSR dispute state
@@ -92,8 +98,11 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
   // Keep local tranche in sync with prop updates
   useEffect(() => {
     setCurrentTranche(initialTranche);
-    if (initialTranche.deliverableProofUrl) {
-      setTelemetryUrl(initialTranche.deliverableProofUrl);
+    if (initialTranche.deliverableProofUrl || initialTranche.telemetryUrl) {
+      setTelemetryUrl(initialTranche.deliverableProofUrl || initialTranche.telemetryUrl || '');
+    }
+    if (initialTranche.handoverNotes) {
+      setHandoverNotes(initialTranche.handoverNotes);
     }
   }, [initialTranche]);
 
@@ -102,7 +111,6 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
   // RBAC Capability Evaluation via verified SessionContext
   const isVerified = session.isVerified;
   const isFaculty = session.role === 'FACULTY_MENTOR' && isVerified;
-  const isPanchayat = session.role === 'PANCHAYAT_OFFICER' && isVerified;
   const isPanchayatOrGovt = (session.role === 'PANCHAYAT_OFFICER' || session.role === 'GOVT_ADMIN') && isVerified;
   const isCSR = session.role === 'INDUSTRY_CSR' && isVerified;
 
@@ -110,10 +118,36 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
   const isDisbursed = currentTranche.status === 'DISBURSED';
   const isDisputed = currentTranche.status === 'DISPUTED';
 
+  // Sequential Pipeline Lock Evaluation
+  const isTranche1Disbursed = grant.tranches[0]?.status === 'DISBURSED';
+  const isTranche2Disbursed = grant.tranches[1]?.status === 'DISBURSED';
+
+  const isPipelineLocked =
+    currentTranche.stage === 'TRANCHE_2_LAB' && !isTranche1Disbursed
+      ? true
+      : currentTranche.stage === 'TRANCHE_3_FIELD' && !isTranche2Disbursed
+      ? true
+      : false;
+
+  const pipelineLockReason =
+    currentTranche.stage === 'TRANCHE_2_LAB' && !isTranche1Disbursed
+      ? 'Sequential Pipeline Locked: Tranche 1 (30% BOM & Architectural Design) must be DISBURSED before Tranche 2 lab prototype funds can be released.'
+      : currentTranche.stage === 'TRANCHE_3_FIELD' && !isTranche2Disbursed
+      ? 'Sequential Pipeline Locked: Tranche 2 (40% Lab Prototype Telemetry) must be DISBURSED before Tranche 3 field handover can begin.'
+      : null;
+
   // Tranche 3 Dual Sign-Off Evaluation
   const hasFacultySignoff = Boolean(currentTranche.facultySignoffAt);
   const hasPanchayatSignoff = Boolean(currentTranche.panchayatSignoffAt || currentTranche.govtSignoffAt);
   const hasDualSignoffs = hasFacultySignoff && hasPanchayatSignoff;
+
+  const dualSignoffIndicatorText = hasDualSignoffs
+    ? '2 of 2 Signatures Registered: Dual Statutory Gate Cleared'
+    : hasFacultySignoff
+    ? '1 of 2 Signatures Registered: Awaiting BDO/Panchayat Sign-Off'
+    : hasPanchayatSignoff
+    ? '1 of 2 Signatures Registered: Awaiting Faculty Mentor Sign-Off'
+    : '0 of 2 Signatures Registered: Awaiting Faculty & BDO/Panchayat Sign-Off';
 
   // Helper to refresh tranche from DB
   const refreshTrancheData = async () => {
@@ -136,8 +170,13 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
   const handleApproveTranche1 = async () => {
     if (!isFaculty) {
       setErrorMessage(
-        'PANEL RESTRICTED: Tranche 1 (BOM) strictly requires verified University Faculty Mentor credentials.'
+        'Statutory Sign-Off Restricted: Requires verified Faculty Mentor or Panchayat/BDO session credentials'
       );
+      return;
+    }
+
+    if (currentTranche.status === 'DISBURSED') {
+      setErrorMessage('Tranche 1 has already been disbursed.');
       return;
     }
 
@@ -147,28 +186,23 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
 
     try {
       const signatory = `${session.fullName} (${session.maskedIdentifier})`;
-      await updateTrancheStatus(
-        grant.id,
-        'TRANCHE_1_BOM',
-        'DISBURSED',
-        'FACULTY',
-        undefined,
-        signatory
-      );
+      const now = Date.now();
+      await updateTrancheStatus(grant.id, 0, {
+        status: 'DISBURSED',
+        facultySignoffAt: now,
+        facultySignoffBy: signatory,
+        disbursedAt: now,
+      });
 
       // Central Sync Broadcast
+      centralSyncService.publish('RECORD_UPDATED', {
+        type: 'ESCROW_UPDATED',
+        grantId: grant.id,
+      });
       centralSyncService.publish('TRANCHE_DISBURSED', {
         grantId: grant.id,
-        stage: 'TRANCHE_1_BOM',
+        trancheIndex: 0,
         amountINR: currentTranche.amountINR,
-        disbursedTo: grant.teamId,
-        signatory,
-        timestamp: Date.now(),
-      });
-      centralSyncService.publish('RECORD_UPDATED', {
-        type: 'escrow_grant',
-        id: grant.id,
-        stage: 'TRANCHE_1_BOM',
       });
 
       // Dispatch native toast notification
@@ -201,9 +235,14 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
   // TRANCHE 2: Faculty Mentor Lab Demonstration (40%) with Telemetry URL Check
   // ---------------------------------------------------------------------------
   const handleApproveTranche2 = async () => {
+    if (isPipelineLocked) {
+      setErrorMessage(pipelineLockReason || 'Sequential Pipeline Locked.');
+      return;
+    }
+
     if (!isFaculty) {
       setErrorMessage(
-        'PANEL RESTRICTED: Tranche 2 (Lab Bench) strictly requires verified University Faculty Mentor credentials.'
+        'Statutory Sign-Off Restricted: Requires verified Faculty Mentor or Panchayat/BDO session credentials'
       );
       return;
     }
@@ -221,30 +260,25 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
 
     try {
       const signatory = `${session.fullName} (${session.maskedIdentifier})`;
-      await updateTrancheStatus(
-        grant.id,
-        'TRANCHE_2_LAB',
-        'DISBURSED',
-        'FACULTY',
-        undefined,
-        signatory,
-        telemetryUrl.trim()
-      );
+      const now = Date.now();
+      await updateTrancheStatus(grant.id, 1, {
+        status: 'DISBURSED',
+        facultySignoffAt: now,
+        facultySignoffBy: signatory,
+        telemetryUrl: telemetryUrl.trim(),
+        deliverableProofUrl: telemetryUrl.trim(),
+        disbursedAt: now,
+      });
 
       // Central Sync Broadcast
+      centralSyncService.publish('RECORD_UPDATED', {
+        type: 'ESCROW_UPDATED',
+        grantId: grant.id,
+      });
       centralSyncService.publish('TRANCHE_DISBURSED', {
         grantId: grant.id,
-        stage: 'TRANCHE_2_LAB',
+        trancheIndex: 1,
         amountINR: currentTranche.amountINR,
-        disbursedTo: grant.teamId,
-        deliverableProofUrl: telemetryUrl.trim(),
-        signatory,
-        timestamp: Date.now(),
-      });
-      centralSyncService.publish('RECORD_UPDATED', {
-        type: 'escrow_grant',
-        id: grant.id,
-        stage: 'TRANCHE_2_LAB',
       });
 
       // Dispatch native toast notification
@@ -277,9 +311,14 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
   // TRANCHE 3: Step A — Faculty Supervisor Sign-Off
   // ---------------------------------------------------------------------------
   const handleSignTranche3Faculty = async () => {
+    if (isPipelineLocked) {
+      setErrorMessage(pipelineLockReason || 'Sequential Pipeline Locked.');
+      return;
+    }
+
     if (!isFaculty) {
       setErrorMessage(
-        'PANEL RESTRICTED: Step A sign-off requires verified University Faculty Mentor credentials.'
+        'Statutory Sign-Off Restricted: Requires verified Faculty Mentor or Panchayat/BDO session credentials'
       );
       return;
     }
@@ -290,21 +329,15 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
 
     try {
       const signatory = `${session.fullName} (${session.maskedIdentifier})`;
-      await updateTrancheStatus(
-        grant.id,
-        'TRANCHE_3_FIELD',
-        'LOCKED', // Keeps locked until Step B completes
-        'FACULTY',
-        undefined,
-        signatory
-      );
+      const now = Date.now();
+      await updateTrancheStatus(grant.id, 2, {
+        facultySignoffAt: now,
+        facultySignoffBy: signatory,
+      });
 
       centralSyncService.publish('RECORD_UPDATED', {
-        type: 'escrow_grant',
-        id: grant.id,
-        stage: 'TRANCHE_3_FIELD',
-        step: 'FACULTY_SIGNED',
-        signatory,
+        type: 'ESCROW_UPDATED',
+        grantId: grant.id,
       });
 
       if (typeof window !== 'undefined') {
@@ -336,9 +369,14 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
   // TRANCHE 3: Step B — Panchayat Secretary / BDO Sign-Off
   // ---------------------------------------------------------------------------
   const handleSignTranche3Panchayat = async () => {
+    if (isPipelineLocked) {
+      setErrorMessage(pipelineLockReason || 'Sequential Pipeline Locked.');
+      return;
+    }
+
     if (!isPanchayatOrGovt) {
       setErrorMessage(
-        'PANEL RESTRICTED: Step B sign-off requires verified Panchayat Secretary or District BDO credentials.'
+        'Statutory Sign-Off Restricted: Requires verified Faculty Mentor or Panchayat/BDO session credentials'
       );
       return;
     }
@@ -349,21 +387,18 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
 
     try {
       const signatory = `${session.fullName} (${session.maskedIdentifier})`;
-      await updateTrancheStatus(
-        grant.id,
-        'TRANCHE_3_FIELD',
-        'LOCKED', // Keeps locked until release button triggers disbursement
-        isPanchayat ? 'PANCHAYAT' : 'GOVT',
-        undefined,
-        signatory
-      );
+      const now = Date.now();
+      await updateTrancheStatus(grant.id, 2, {
+        govtSignoffAt: now,
+        govtSignoffBy: signatory,
+        panchayatSignoffAt: now,
+        panchayatSignoffBy: signatory,
+        handoverNotes: handoverNotes.trim() || undefined,
+      });
 
       centralSyncService.publish('RECORD_UPDATED', {
-        type: 'escrow_grant',
-        id: grant.id,
-        stage: 'TRANCHE_3_FIELD',
-        step: 'PANCHAYAT_SIGNED',
-        signatory,
+        type: 'ESCROW_UPDATED',
+        grantId: grant.id,
       });
 
       if (typeof window !== 'undefined') {
@@ -395,6 +430,11 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
   // TRANCHE 3: Master Release Action (Strictly disabled until BOTH Step A & B signed)
   // ---------------------------------------------------------------------------
   const handleDisburseTranche3 = async () => {
+    if (isPipelineLocked) {
+      setErrorMessage(pipelineLockReason || 'Sequential Pipeline Locked.');
+      return;
+    }
+
     if (!hasDualSignoffs) {
       setErrorMessage(
         'Guardrail Violation: Tranche 3 disbursement is strictly locked until BOTH Faculty Mentor and Panchayat Secretary / BDO sign-offs are stamped.'
@@ -407,31 +447,21 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
     setSuccessNotice(null);
 
     try {
-      const signatory = `${session.fullName} (${session.maskedIdentifier})`;
-      await updateTrancheStatus(
-        grant.id,
-        'TRANCHE_3_FIELD',
-        'DISBURSED',
-        isFaculty ? 'FACULTY' : 'GOVT',
-        undefined,
-        signatory
-      );
+      const now = Date.now();
+      await updateTrancheStatus(grant.id, 2, {
+        status: 'DISBURSED',
+        disbursedAt: now,
+      });
 
       // Central Sync Broadcast
+      centralSyncService.publish('RECORD_UPDATED', {
+        type: 'ESCROW_UPDATED',
+        grantId: grant.id,
+      });
       centralSyncService.publish('TRANCHE_DISBURSED', {
         grantId: grant.id,
-        stage: 'TRANCHE_3_FIELD',
+        trancheIndex: 2,
         amountINR: currentTranche.amountINR,
-        disbursedTo: grant.teamId,
-        facultySignoffBy: currentTranche.facultySignoffBy,
-        panchayatSignoffBy: currentTranche.panchayatSignoffBy || currentTranche.govtSignoffBy,
-        signatory,
-        timestamp: Date.now(),
-      });
-      centralSyncService.publish('RECORD_UPDATED', {
-        type: 'escrow_grant',
-        id: grant.id,
-        stage: 'TRANCHE_3_FIELD',
       });
 
       if (typeof window !== 'undefined') {
@@ -663,9 +693,39 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
         <div className="p-4 overflow-y-auto space-y-4 flex-1">
           {/* Statutory Objections or Error Notifications */}
           {errorMessage && (
-            <div className="p-3 bg-red-100 border border-red-400 text-red-900 text-xs font-bold flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-red-700 shrink-0" />
-              <span>{errorMessage}</span>
+            <div className="p-3.5 bg-amber-50 border-2 border-amber-600 text-amber-950 text-xs space-y-2">
+              <div className="flex items-center gap-2 font-bold text-amber-900">
+                <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                <span>{errorMessage}</span>
+              </div>
+              {errorMessage.includes('Statutory Sign-Off Restricted') && (
+                <div className="pt-1 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={openVerificationModal}
+                    className="px-3 py-1.5 bg-[#7A1B1B] hover:bg-[#962626] text-[#F8E7A2] text-xs font-black uppercase tracking-wider transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    <span>Authenticate Credentials via Passkey</span>
+                  </button>
+                  <span className="text-[10px] text-amber-800">
+                    DHTE Jharkhand Salted RBAC Verification Gate
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Sequential Pipeline Lock Alert */}
+          {isPipelineLocked && (
+            <div className="p-3.5 bg-amber-50 border-2 border-amber-500 text-amber-950 text-xs space-y-1">
+              <div className="flex items-center gap-2 font-bold text-amber-900">
+                <Lock className="w-4 h-4 text-amber-700 shrink-0" />
+                <span className="uppercase tracking-wider">Sequential Milestone Pipeline Locked</span>
+              </div>
+              <p className="text-[11px] text-amber-800 font-medium">
+                {pipelineLockReason}
+              </p>
             </div>
           )}
 
@@ -862,13 +922,17 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
                   </div>
                 )}
 
-                {/* Action Button for verified Faculty */}
-                {!isDisbursed && isFaculty && (
+                {/* Action Button for Tranche 1 */}
+                {!isDisbursed && (
                   <button
                     type="button"
                     disabled={isSubmitting}
                     onClick={handleApproveTranche1}
-                    className="w-full py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-black uppercase tracking-wider transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-xs disabled:opacity-50"
+                    className={`w-full py-2.5 text-xs font-black uppercase tracking-wider transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-xs disabled:opacity-50 ${
+                      isFaculty
+                        ? 'bg-emerald-700 hover:bg-emerald-800 text-white'
+                        : 'bg-slate-700 hover:bg-slate-800 text-white'
+                    }`}
                   >
                     <CheckCircle2 className="w-4 h-4" />
                     <span>
@@ -943,19 +1007,35 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
                   </div>
                 )}
 
-                {/* Action Button for verified Faculty */}
-                {!isDisbursed && isFaculty && (
+                {/* Action Button for Tranche 2 */}
+                {!isDisbursed && (
                   <button
                     type="button"
-                    disabled={isSubmitting || !telemetryUrl.trim()}
+                    disabled={isSubmitting || (isFaculty && !telemetryUrl.trim()) || isPipelineLocked}
                     onClick={handleApproveTranche2}
-                    className="w-full py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-black uppercase tracking-wider transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-xs disabled:opacity-50"
+                    className={`w-full py-2.5 text-xs font-black uppercase tracking-wider transition-colors flex items-center justify-center gap-2 shadow-xs cursor-pointer ${
+                      isPipelineLocked
+                        ? 'bg-slate-200 text-slate-500 border border-slate-300 cursor-not-allowed'
+                        : isFaculty
+                        ? 'bg-emerald-700 hover:bg-emerald-800 text-white'
+                        : 'bg-slate-700 hover:bg-slate-800 text-white'
+                    }`}
+                    title={isPipelineLocked ? pipelineLockReason || 'Pipeline Locked' : undefined}
                   >
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>
-                      Validate Telemetry &amp; Disburse Tranche 2 (₹
-                      {currentTranche.amountINR.toLocaleString('en-IN')})
-                    </span>
+                    {isPipelineLocked ? (
+                      <>
+                        <Lock className="w-4 h-4 text-slate-400" />
+                        <span>Tranche 2 Locked (Awaiting Tranche 1 BOM Disbursement)</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>
+                          Validate Telemetry &amp; Disburse Tranche 2 (₹
+                          {currentTranche.amountINR.toLocaleString('en-IN')})
+                        </span>
+                      </>
+                    )}
                   </button>
                 )}
               </div>
@@ -985,18 +1065,18 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
                       )}
                       <span>Dual-Signature Regulatory Protocol</span>
                     </span>
-                    <span className="font-mono text-[11px] px-2 py-0.5 bg-white border border-slate-300">
-                      {hasDualSignoffs ? '2 / 2 SIGNED' : hasFacultySignoff || hasPanchayatSignoff ? '1 / 2 SIGNED' : '0 / 2 SIGNED'}
+                    <span className="font-mono text-[10px] px-2 py-0.5 bg-white border border-slate-300 font-bold">
+                      {dualSignoffIndicatorText}
                     </span>
                   </div>
                   <p className="text-[11px] leading-relaxed">
                     {hasDualSignoffs
                       ? 'Dual Gate Cleared: Both Faculty Mentor and Panchayat Secretary/BDO signatures are stamped on the decentralized ledger. Funds are unlocked for release.'
                       : hasFacultySignoff
-                      ? 'Partial Clearance: Faculty sign-off stamped. Awaiting Panchayat Secretary / BDO field deployment confirmation.'
+                      ? '1 of 2 Signatures Registered: Awaiting BDO/Panchayat Sign-Off to confirm community deployment and citizen handover.'
                       : hasPanchayatSignoff
-                      ? 'Partial Clearance: Panchayat confirmation stamped. Awaiting University Faculty Mentor academic clearance.'
-                      : 'Dual-Lock Enforced: Release button remains strictly disabled until BOTH Faculty Mentor and Panchayat Secretary / BDO sign-offs are registered.'}
+                      ? '1 of 2 Signatures Registered: Awaiting Faculty Mentor Sign-Off to confirm capstone technical integrity.'
+                      : 'Dual-Lock Enforced: 0 of 2 Signatures Registered. Release button remains strictly disabled until BOTH Faculty Mentor and Panchayat Secretary / BDO sign-offs are committed.'}
                   </p>
                 </div>
 
@@ -1027,24 +1107,39 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
                     </div>
 
                     {!hasFacultySignoff && !isDisbursed && (
-                      <div>
-                        {isFaculty ? (
-                          <button
-                            type="button"
-                            disabled={isSubmitting}
-                            onClick={handleSignTranche3Faculty}
-                            className="w-full py-1.5 bg-[#0B2545] hover:bg-[#1E3A5F] text-white text-[11px] font-bold uppercase transition-colors cursor-pointer shadow-2xs"
-                          >
-                            Sign as Faculty Supervisor
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => switchRole('FACULTY_MENTOR')}
-                            className="w-full py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold uppercase transition-colors cursor-pointer"
-                          >
-                            Switch to Faculty to Sign
-                          </button>
+                      <div className="space-y-1.5">
+                        <button
+                          type="button"
+                          disabled={isSubmitting || isPipelineLocked}
+                          onClick={handleSignTranche3Faculty}
+                          className={`w-full py-1.5 text-[11px] font-bold uppercase transition-colors shadow-2xs ${
+                            isPipelineLocked
+                              ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                              : isFaculty
+                              ? 'bg-[#0B2545] hover:bg-[#1E3A5F] text-white cursor-pointer'
+                              : 'bg-slate-700 hover:bg-slate-800 text-white cursor-pointer'
+                          }`}
+                        >
+                          Sign as Faculty Supervisor
+                        </button>
+                        {!isFaculty && (
+                          <div className="flex items-center gap-1.5 pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() => switchRole('FACULTY_MENTOR')}
+                              className="flex-1 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold uppercase transition-colors cursor-pointer text-center"
+                            >
+                              Switch to Faculty
+                            </button>
+                            <button
+                              type="button"
+                              onClick={openVerificationModal}
+                              className="px-2 py-1 bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-bold uppercase transition-colors cursor-pointer"
+                              title="Verify Profile"
+                            >
+                              Verify
+                            </button>
+                          </div>
                         )}
                       </div>
                     )}
@@ -1073,27 +1168,59 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
                           {currentTranche.panchayatSignoffBy || currentTranche.govtSignoffBy}
                         </p>
                       )}
+
+                      {/* Handover Inspection Note Input */}
+                      {!isDisbursed && (
+                        <div className="mt-2 space-y-1">
+                          <label className="text-[10px] font-bold text-slate-600 uppercase block">
+                            Field Handover Inspection Note:
+                          </label>
+                          <textarea
+                            rows={2}
+                            value={handoverNotes}
+                            disabled={isDisbursed || !isPanchayatOrGovt}
+                            onChange={(e) => setHandoverNotes(e.target.value)}
+                            placeholder="e.g. Community drinking water filter handed over at Dumka Sadar, Gram Sabha inspected."
+                            className="w-full p-1.5 text-xs border border-slate-300 bg-white focus:outline-none"
+                          />
+                        </div>
+                      )}
                     </div>
 
                     {!hasPanchayatSignoff && !isDisbursed && (
-                      <div>
-                        {isPanchayatOrGovt ? (
-                          <button
-                            type="button"
-                            disabled={isSubmitting}
-                            onClick={handleSignTranche3Panchayat}
-                            className="w-full py-1.5 bg-[#1E6F50] hover:bg-[#16563e] text-white text-[11px] font-bold uppercase transition-colors cursor-pointer shadow-2xs"
-                          >
-                            Sign as Panchayat / BDO
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => switchRole('PANCHAYAT_OFFICER')}
-                            className="w-full py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold uppercase transition-colors cursor-pointer"
-                          >
-                            Switch to Panchayat to Sign
-                          </button>
+                      <div className="space-y-1.5">
+                        <button
+                          type="button"
+                          disabled={isSubmitting || isPipelineLocked}
+                          onClick={handleSignTranche3Panchayat}
+                          className={`w-full py-1.5 text-[11px] font-bold uppercase transition-colors shadow-2xs ${
+                            isPipelineLocked
+                              ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                              : isPanchayatOrGovt
+                              ? 'bg-[#1E6F50] hover:bg-[#16563e] text-white cursor-pointer'
+                              : 'bg-slate-700 hover:bg-slate-800 text-white cursor-pointer'
+                          }`}
+                        >
+                          Sign as Panchayat / BDO
+                        </button>
+                        {!isPanchayatOrGovt && (
+                          <div className="flex items-center gap-1.5 pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() => switchRole('PANCHAYAT_OFFICER')}
+                              className="flex-1 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold uppercase transition-colors cursor-pointer text-center"
+                            >
+                              Switch to Panchayat
+                            </button>
+                            <button
+                              type="button"
+                              onClick={openVerificationModal}
+                              className="px-2 py-1 bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-bold uppercase transition-colors cursor-pointer"
+                              title="Verify Profile"
+                            >
+                              Verify
+                            </button>
+                          </div>
                         )}
                       </div>
                     )}
@@ -1105,20 +1232,22 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
                   <div className="pt-2">
                     <button
                       type="button"
-                      disabled={isSubmitting || !hasDualSignoffs}
+                      disabled={isSubmitting || !hasDualSignoffs || isPipelineLocked}
                       onClick={handleDisburseTranche3}
                       className={`w-full py-2.5 text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-xs ${
-                        hasDualSignoffs
+                        hasDualSignoffs && !isPipelineLocked
                           ? 'bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer ring-2 ring-emerald-400'
-                          : 'bg-slate-200 text-slate-400 border border-slate-300 cursor-not-allowed'
+                          : 'bg-slate-200 text-slate-500 border border-slate-300 cursor-not-allowed'
                       }`}
                       title={
-                        !hasDualSignoffs
-                          ? 'Disabled: Requires both Faculty and Panchayat/BDO signatures'
+                        isPipelineLocked
+                          ? 'Sequential Pipeline Locked'
+                          : !hasDualSignoffs
+                          ? dualSignoffIndicatorText
                           : 'Execute Tranche 3 Escrow Release'
                       }
                     >
-                      {hasDualSignoffs ? (
+                      {hasDualSignoffs && !isPipelineLocked ? (
                         <>
                           <CheckCircle2 className="w-4 h-4 text-white" />
                           <span>
@@ -1130,7 +1259,9 @@ export const TrancheReleaseModal: React.FC<TrancheReleaseModalProps> = ({
                         <>
                           <Lock className="w-4 h-4 text-slate-400" />
                           <span>
-                            Tranche 3 Locked (Awaiting {hasFacultySignoff ? 'Panchayat' : hasPanchayatSignoff ? 'Faculty' : 'Dual'} Sign-off)
+                            {isPipelineLocked
+                              ? 'Tranche 3 Locked (Pipeline Prerequisite Unmet)'
+                              : dualSignoffIndicatorText}
                           </span>
                         </>
                       )}

@@ -30,7 +30,8 @@ import {
   SafetyValidation,
   Tier2EvaluatorAgency,
 } from '../../../types/governance';
-import { signTier1Safety, certifyTier2Safety, getSafetyValidationById } from '../../../lib/db';
+import { StudentTeam, EngineeringProblemBrief } from '../../../types/solver';
+import { db, signTier1Safety, certifyTier2Safety, getSafetyValidationById } from '../../../lib/db';
 import { useSession } from '../../../context/SessionContext';
 import { centralSyncService } from '../../../services/centralSyncService';
 
@@ -78,7 +79,7 @@ const STANDARD_PRESETS = [
  * Creates an authentic 25x25 Version 2 QR matrix with finder patterns,
  * timing tracks, alignment pattern, and payload hash modules.
  */
-const NativeSvgQRCode: React.FC<{ payload: string; size?: number }> = ({ payload, size = 160 }) => {
+export const NativeSvgQRCode: React.FC<{ payload: string; size?: number }> = ({ payload, size = 160 }) => {
   const gridSize = 25;
   const grid: boolean[][] = Array.from({ length: gridSize }, () => Array(gridSize).fill(false));
   const reserved: boolean[][] = Array.from({ length: gridSize }, () => Array(gridSize).fill(false));
@@ -226,12 +227,48 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
   const [isCertifyingTier2, setIsCertifyingTier2] = useState(false);
   const [tier2Message, setTier2Message] = useState<string | null>(null);
 
+  // Metadata states for enriched pilot pass card
+  const [team, setTeam] = useState<StudentTeam | null>(null);
+  const [brief, setBrief] = useState<EngineeringProblemBrief | null>(null);
+
+  // Load associated team and brief metadata for authentic certificate display
+  useEffect(() => {
+    let isMounted = true;
+    const fetchMetadata = async () => {
+      try {
+        if (currentVal.teamId) {
+          const foundTeam = await db.studentTeams.get(currentVal.teamId);
+          if (isMounted && foundTeam) {
+            setTeam(foundTeam);
+            if (foundTeam.briefId) {
+              const foundBrief = await db.engineeringBriefs.get(foundTeam.briefId);
+              if (isMounted && foundBrief) setBrief(foundBrief);
+            }
+          }
+        }
+        if (currentVal.masterIssueId) {
+          const foundBrief = await db.engineeringBriefs
+            .where('masterIssueId')
+            .equals(currentVal.masterIssueId)
+            .first();
+          if (isMounted && foundBrief) setBrief(foundBrief);
+        }
+      } catch {
+        // Non-blocking metadata fetch
+      }
+    };
+    fetchMetadata();
+    return () => {
+      isMounted = false;
+    };
+  }, [currentVal.teamId, currentVal.masterIssueId]);
+
   if (!isOpen) return null;
 
   // Handle Faculty Sign-off on Tier 1
   const handleSignTier1 = async () => {
     if (!isFacultyMentor) {
-      setTier1Message('PANEL RESTRICTED: Requires verified Faculty Mentor credentials.');
+      setTier1Message('Tier 1 Clearance Restricted: Requires verified Faculty Mentor credentials.');
       return;
     }
     if (!tier1HOD.trim()) {
@@ -246,14 +283,18 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
     try {
       setIsSigningTier1(true);
       setTier1Message(null);
-      await signTier1Safety(currentVal.id, tier1HOD.trim(), tier1Url.trim());
+      await signTier1Safety(currentVal.id, tier1HOD.trim(), tier1Url.trim(), session.maskedIdentifier);
 
       const refreshed = await getSafetyValidationById(currentVal.id);
       if (refreshed) {
         setCurrentVal(refreshed);
       }
 
-      // Publish Central Sync broadcast
+      // Publish Central Sync broadcast (Task 7.2)
+      centralSyncService.publish('RECORD_UPDATED', {
+        type: 'SAFETY_TIER1_SIGNED',
+        validationId: currentVal.id,
+      });
       centralSyncService.publish('RECORD_UPDATED', {
         type: 'safety_validation',
         id: currentVal.id,
@@ -291,7 +332,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
   const handleCertifyTier2 = async () => {
     if (!isEvaluatorOrGovt) {
       setTier2Message(
-        'PANEL RESTRICTED: Requires Accredited Evaluator (CSIR-CIMFR) or Govt Admin credentials.'
+        'Tier 2 Statutory Clearance Restricted: Requires verified Accredited Evaluator (CSIR-CIMFR/NABL) or Govt Admin credentials.'
       );
       return;
     }
@@ -303,29 +344,38 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
       setTier2Message('Please provide applicable BIS standard code.');
       return;
     }
+    if (!certUrl.trim()) {
+      setTier2Message('Please provide statutory test certificate proof URL.');
+      return;
+    }
 
     try {
       setIsCertifyingTier2(true);
       setTier2Message(null);
-      await certifyTier2Safety(currentVal.id, evaluatorAgency, bisCode.trim(), certUrl.trim());
+      const permitToken = await certifyTier2Safety(
+        currentVal.id,
+        evaluatorAgency,
+        bisCode.trim(),
+        certUrl.trim(),
+        session.maskedIdentifier
+      );
 
       const refreshed = await getSafetyValidationById(currentVal.id);
       if (refreshed) {
         setCurrentVal(refreshed);
       }
 
-      // Publish Central Sync broadcasts
+      // Publish Central Sync broadcasts (Task 7.2)
       centralSyncService.publish('SAFETY_GATE_CLEARED', {
-        id: currentVal.id,
-        masterIssueId: currentVal.masterIssueId,
-        permitId: refreshed?.dcPilotPermitQR || 'JH-DC-PILOT-PERMIT-2026-AUT',
-        timestamp: Date.now(),
+        validationId: currentVal.id,
+        permitToken: permitToken || refreshed?.dcPilotPermitQR || 'JH-DC-PILOT-PERMIT-2026-AUT',
       });
       centralSyncService.publish('RECORD_UPDATED', {
         type: 'safety_validation',
         id: currentVal.id,
         tier2BisPassed: true,
         isPublicPilotCleared: true,
+        permitToken,
       });
 
       // Dispatch native toast
@@ -362,9 +412,25 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
   const isPilotCleared = Boolean(currentVal.isPublicPilotCleared && isTier1Passed && isTier2Passed);
 
   const permitId = currentVal.dcPilotPermitQR || 'JH-DC-PILOT-PERMIT-2026-8821';
+
+  // 90-Day Field Validity Window Calculation
+  const clearanceTimestamp = currentVal.clearedAt || currentVal.tier2CertifiedAt || Date.now();
+  const clearanceDateFormatted = new Date(clearanceTimestamp).toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+  const expiryTimestamp = clearanceTimestamp + 90 * 24 * 60 * 60 * 1000;
+  const expiryDateFormatted = new Date(expiryTimestamp).toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+  const daysRemaining = Math.max(0, Math.ceil((expiryTimestamp - Date.now()) / (24 * 60 * 60 * 1000)));
+
   const qrPayload = `https://udbhav.jharkhand.gov.in/verify/pilot?permit=${permitId}&issue=${currentVal.masterIssueId}&bis=${encodeURIComponent(
     currentVal.tier2BisStandardCode || bisCode
-  )}&lab=${currentVal.tier2EvaluatorAgency}&status=AUTHORIZED`;
+  )}&lab=${currentVal.tier2EvaluatorAgency || evaluatorAgency}&status=AUTHORIZED`;
 
   return (
     <div
@@ -373,11 +439,43 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
       aria-labelledby="modal-title"
       className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/75 backdrop-blur-2xs overflow-y-auto"
     >
+      <style>{`
+        @media print {
+          body * {
+            visibility: hidden !important;
+          }
+          #udbhav-pilot-pass-print, #udbhav-pilot-pass-print * {
+            visibility: visible !important;
+          }
+          #udbhav-pilot-pass-print {
+            position: absolute !important;
+            left: 0 !important;
+            top: 0 !important;
+            width: 100% !important;
+            margin: 0 !important;
+            padding: 10mm 12mm !important;
+            box-shadow: none !important;
+            border: 3px double #7A1B1B !important;
+            background: white !important;
+            color: #000 !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+          .no-print {
+            display: none !important;
+          }
+          .page-break-inside-avoid {
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+        }
+      `}</style>
+
       <div className="relative w-full max-w-4xl bg-white border-2 border-slate-400 shadow-2xl max-h-[94vh] flex flex-col my-auto text-slate-800">
         {/* ==================================================================== */}
         {/* 1. MODAL HEADER: JHARKHAND GIGW 3.0 EXECUTIVE BANNER */}
         {/* ==================================================================== */}
-        <div className="bg-[#0B2545] text-white p-4 border-b-4 border-amber-500 shrink-0">
+        <div className="no-print bg-[#0B2545] text-white p-4 border-b-4 border-amber-500 shrink-0">
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-center gap-3">
               <div className="bg-[#7A1B1B] text-[#F8E7A2] p-2.5 border border-amber-900/60 shrink-0">
@@ -425,7 +523,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
                 Challenge: {currentVal.masterIssueId}
               </span>
               <span className="bg-white/10 px-2 py-0.5 text-slate-200">
-                Solver: {currentVal.teamId}
+                Solver: {team?.teamName || currentVal.teamId}
               </span>
             </div>
 
@@ -444,7 +542,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
                 className="ml-2 px-1.5 py-0.5 bg-amber-400 hover:bg-amber-300 text-slate-950 text-[10px] font-black uppercase rounded-none cursor-pointer"
                 title="Switch role or verify credentials"
               >
-                Switch Role
+                Verify Session
               </button>
             </div>
           </div>
@@ -453,7 +551,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
         {/* ==================================================================== */}
         {/* 2. PROGRESS RAIL: 3 SEQUENTIAL STEPS */}
         {/* ==================================================================== */}
-        <div className="bg-slate-100 p-3 border-b border-slate-300 grid grid-cols-3 gap-2 text-xs shrink-0">
+        <div className="no-print bg-slate-100 p-3 border-b border-slate-300 grid grid-cols-3 gap-2 text-xs shrink-0">
           <div
             className={`p-2 border flex items-center gap-2 ${
               isTier1Passed
@@ -520,7 +618,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
           {/* ------------------------------------------------------------------ */}
           {/* STEP 1: TIER 1 ACADEMIC LAB BENCH CLEARANCE (INTERNAL GATE) */}
           {/* ------------------------------------------------------------------ */}
-          <div className="border-2 border-slate-300 p-4 space-y-3 bg-white">
+          <div className="no-print border-2 border-slate-300 p-4 space-y-3 bg-white">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-2">
               <div className="flex items-center gap-2">
                 <span className="w-6 h-6 rounded-full bg-[#0B2545] text-white flex items-center justify-center text-xs font-black">
@@ -600,24 +698,35 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
             {!isTier1Passed && (
               <div className="bg-amber-50/70 border border-amber-300 p-3 space-y-3">
                 {!isFacultyMentor ? (
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-2 bg-amber-100 border border-amber-400 text-amber-950 text-xs">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-amber-100 border-2 border-amber-400 text-amber-950 text-xs">
                     <div className="flex items-start gap-2">
                       <AlertTriangle className="w-4 h-4 text-amber-800 shrink-0 mt-0.5" />
                       <div>
-                        <strong className="block">PANEL RESTRICTED: Requires Faculty Mentor Credentials</strong>
-                        <span>
+                        <strong className="block font-black text-amber-950">
+                          Tier 1 Clearance Restricted: Requires verified Faculty Mentor credentials.
+                        </strong>
+                        <span className="text-[11px] text-amber-900 mt-0.5 block">
                           Lab bench telemetry validation requires verified Faculty Mentor session. Currently active as{' '}
-                          <strong>{session.role}</strong> ({session.maskedIdentifier}).
+                          <strong>{session.role}</strong> ({session.maskedIdentifier}){session.isVerified ? ' [Verified]' : ' [Unverified]'}.
                         </span>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => switchRole('FACULTY_MENTOR')}
-                      className="px-3 py-1.5 bg-[#7A1B1B] hover:bg-[#5E1414] text-white text-xs font-bold uppercase shrink-0 cursor-pointer"
-                    >
-                      Switch to Faculty Mentor
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={openVerificationModal}
+                        className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold uppercase cursor-pointer transition-colors shadow-2xs"
+                      >
+                        Verify Credentials
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => switchRole('FACULTY_MENTOR')}
+                        className="px-2.5 py-1 bg-[#7A1B1B] hover:bg-[#5E1414] text-white text-xs font-bold uppercase shrink-0 cursor-pointer transition-colors shadow-2xs"
+                      >
+                        Switch Role
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div className="space-y-3 pt-1">
@@ -674,7 +783,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
           {/* STEP 2: TIER 2 STATUTORY BIS TESTING CERTIFICATION (EXTERNAL GATE) */}
           {/* ------------------------------------------------------------------ */}
           <div
-            className={`border-2 p-4 space-y-3 ${
+            className={`no-print border-2 p-4 space-y-3 ${
               !isTier1Passed
                 ? 'bg-slate-50 border-slate-200 opacity-70'
                 : 'bg-white border-slate-300'
@@ -788,26 +897,35 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
               /* Pending Certification Form for ACCREDITED_EVALUATOR or GOVT_ADMIN */
               <div className="space-y-3 bg-slate-50 p-3 border border-slate-300">
                 {!isEvaluatorOrGovt ? (
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-2 bg-amber-100 border border-amber-400 text-amber-950 text-xs">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-amber-100 border-2 border-amber-400 text-amber-950 text-xs">
                     <div className="flex items-start gap-2">
                       <AlertTriangle className="w-4 h-4 text-amber-800 shrink-0 mt-0.5" />
                       <div>
-                        <strong className="block">
-                          PANEL RESTRICTED: Requires Accredited Evaluator or Govt Admin
+                        <strong className="block font-black text-amber-950">
+                          Tier 2 Statutory Clearance Restricted: Requires verified Accredited Evaluator (CSIR-CIMFR/NABL) or Govt Admin credentials.
                         </strong>
-                        <span>
+                        <span className="text-[11px] text-amber-900 mt-0.5 block">
                           Issuing statutory BIS compliance requires CSIR-CIMFR/NABL Evaluator or State Govt Admin.
-                          Currently active as <strong>{session.role}</strong>.
+                          Currently active as <strong>{session.role}</strong> ({session.maskedIdentifier}){session.isVerified ? ' [Verified]' : ' [Unverified]'}.
                         </span>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => switchRole('ACCREDITED_EVALUATOR')}
-                      className="px-3 py-1.5 bg-[#7A1B1B] hover:bg-[#5E1414] text-white text-xs font-bold uppercase shrink-0 cursor-pointer"
-                    >
-                      Switch to Evaluator
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={openVerificationModal}
+                        className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold uppercase cursor-pointer transition-colors shadow-2xs"
+                      >
+                        Verify Credentials
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => switchRole('ACCREDITED_EVALUATOR')}
+                        className="px-2.5 py-1 bg-[#7A1B1B] hover:bg-[#5E1414] text-white text-xs font-bold uppercase shrink-0 cursor-pointer transition-colors shadow-2xs"
+                      >
+                        Switch Role
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <>
@@ -901,10 +1019,10 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
           {/* ------------------------------------------------------------------ */}
           <div
             className={`border-2 p-4 space-y-4 ${
-              !isPilotCleared ? 'bg-slate-50 border-slate-300' : 'bg-emerald-50/30 border-[#1E6F50]'
+              !isPilotCleared ? 'no-print bg-slate-50 border-slate-300' : 'bg-emerald-50/30 border-[#1E6F50]'
             }`}
           >
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-2">
+            <div className="no-print flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-2">
               <div className="flex items-center gap-2">
                 <span
                   className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-black ${
@@ -937,7 +1055,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
             </div>
 
             {!isPilotCleared ? (
-              <div className="p-4 bg-slate-100 border border-slate-300 text-center space-y-2">
+              <div className="no-print p-4 bg-slate-100 border border-slate-300 text-center space-y-2">
                 <Lock className="w-8 h-8 text-slate-400 mx-auto" />
                 <h4 className="font-black text-xs uppercase text-slate-700">
                   Public Pilot Authorization Locked
@@ -950,21 +1068,25 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
             ) : (
               /* OFFICIAL GOVERNMENT OF JHARKHAND DISTRICT COLLECTOR PILOT PASS */
               <div className="space-y-4">
-                <div className="border-4 border-[#7A1B1B] p-4 sm:p-5 bg-white shadow-md relative overflow-hidden">
+                <div
+                  id="udbhav-pilot-pass-print"
+                  className="border-4 border-[#7A1B1B] p-4 sm:p-5 bg-white shadow-md relative overflow-hidden page-break-inside-avoid"
+                >
                   {/* Subtle Jharkhand Gov watermark badge */}
                   <div className="absolute right-3 top-3 opacity-10 pointer-events-none select-none">
                     <ShieldCheck className="w-48 h-48 text-[#7A1B1B]" />
                   </div>
 
-                  {/* Official Header */}
+                  {/* Official State Emblem Header */}
                   <div className="text-center border-b-2 border-slate-300 pb-3 space-y-1">
-                    <div className="inline-flex items-center gap-2 bg-[#7A1B1B] text-[#F8E7A2] px-3 py-0.5 text-[10px] font-black uppercase tracking-widest">
-                      GOVERNMENT OF JHARKHAND &bull; झारखण्ड सरकार
+                    <div className="inline-flex items-center gap-2 bg-[#7A1B1B] text-[#F8E7A2] px-3.5 py-1 text-[11px] font-black uppercase tracking-widest border border-amber-900/60 shadow-2xs">
+                      <ShieldCheck className="w-4 h-4 text-amber-300" />
+                      <span>GOVERNMENT OF JHARKHAND &bull; झारखण्ड सरकार</span>
                     </div>
-                    <h3 className="text-sm sm:text-base font-black text-[#0B2545] uppercase tracking-wide">
+                    <h3 className="text-sm sm:text-base font-black text-[#0B2545] uppercase tracking-wide mt-1">
                       Office of the District Magistrate &amp; District Collector
                     </h3>
-                    <p className="text-[11px] font-bold text-slate-600 uppercase">
+                    <p className="text-[11px] font-bold text-slate-700 uppercase">
                       Directorate of Higher &amp; Technical Education &bull; Project Udbhav Statutory Field Clearance
                     </p>
                   </div>
@@ -995,6 +1117,16 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
                         </span>
                       </div>
 
+                      {/* Project Title Banner */}
+                      <div className="bg-slate-50 p-2 border border-slate-200">
+                        <span className="text-[9px] uppercase font-bold text-slate-500 block">
+                          Project Title:
+                        </span>
+                        <h4 className="text-xs sm:text-sm font-black text-[#0B2545] mt-0.5">
+                          {brief?.title || 'Solar-Powered Arsenic Remediation & Heavy Metal Sensor Unit'}
+                        </h4>
+                      </div>
+
                       <div className="grid grid-cols-2 gap-2 text-xs">
                         <div>
                           <span className="text-[10px] uppercase font-bold text-slate-500 block">
@@ -1007,10 +1139,15 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
 
                         <div>
                           <span className="text-[10px] uppercase font-bold text-slate-500 block">
-                            Accredited Solver Team:
+                            Lead Solver Team:
                           </span>
-                          <span className="font-mono font-bold text-slate-800">
-                            {currentVal.teamId}
+                          <span className="font-bold text-slate-800">
+                            {team?.teamName || currentVal.teamId}
+                            {team?.leadCollege && (
+                              <span className="text-slate-500 font-normal block text-[10px]">
+                                ({team.leadCollege})
+                              </span>
+                            )}
                           </span>
                         </div>
 
@@ -1018,7 +1155,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
                           <span className="text-[10px] uppercase font-bold text-slate-500 block">
                             Statutory BIS Standard:
                           </span>
-                          <span className="font-mono text-slate-700">
+                          <span className="font-mono text-slate-700 font-bold">
                             {currentVal.tier2BisStandardCode}
                           </span>
                         </div>
@@ -1035,10 +1172,13 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
 
                         <div>
                           <span className="text-[10px] uppercase font-bold text-slate-500 block">
-                            Validity Period:
+                            Field Validity Window:
                           </span>
                           <span className="font-bold text-emerald-800">
-                            90 Calendar Days from Clearance
+                            {clearanceDateFormatted} &ndash; {expiryDateFormatted}
+                          </span>
+                          <span className="text-[10px] text-slate-500 block">
+                            ({daysRemaining} Days Remaining)
                           </span>
                         </div>
 
@@ -1052,6 +1192,23 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
                         </div>
                       </div>
 
+                      {/* Official Signatures Strip */}
+                      <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-200 text-[10px]">
+                        <div className="border-l-2 border-[#1E6F50] pl-2">
+                          <span className="font-bold text-slate-600 block">Tier 1 Academic Sign-Off:</span>
+                          <span className="font-semibold text-slate-800">
+                            {currentVal.tier1HODName || 'Faculty Supervisor'}
+                          </span>
+                        </div>
+                        <div className="border-l-2 border-[#7A1B1B] pl-2">
+                          <span className="font-bold text-slate-600 block">Tier 2 BIS Statutory Audit:</span>
+                          <span className="font-semibold text-slate-800">
+                            {EVALUATOR_AGENCIES.find((a) => a.id === currentVal.tier2EvaluatorAgency)?.id ||
+                              'CSIR-CIMFR Dhanbad'}
+                          </span>
+                        </div>
+                      </div>
+
                       <div className="pt-2 border-t border-slate-200 text-[10px] text-slate-500 leading-snug">
                         This digital permit certifies that the hardware prototype has cleared institutional lab calibration and independent statutory testing under the specified standard code. Authorized for public deployment under the Project Udbhav framework.
                       </div>
@@ -1059,14 +1216,14 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
                   </div>
 
                   {/* Print Action Strip */}
-                  <div className="mt-4 pt-3 border-t border-slate-200 flex justify-end">
+                  <div className="no-print mt-4 pt-3 border-t border-slate-200 flex justify-end">
                     <button
                       type="button"
                       onClick={handlePrint}
-                      className="px-3 py-1.5 bg-[#0B2545] hover:bg-[#1E3A5F] text-white text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                      className="px-3.5 py-2 bg-[#0B2545] hover:bg-[#1E3A5F] text-white text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
                     >
                       <Printer className="w-3.5 h-3.5 text-[#F8E7A2]" />
-                      <span>Print DC Pilot Authorization Pass</span>
+                      <span>Print / Save Authorization PDF</span>
                     </button>
                   </div>
                 </div>
@@ -1078,7 +1235,7 @@ export const TwoTierSafetyGateModal: React.FC<TwoTierSafetyGateModalProps> = ({
         {/* ==================================================================== */}
         {/* 4. MODAL FOOTER */}
         {/* ==================================================================== */}
-        <div className="bg-slate-100 p-3 border-t border-slate-300 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
+        <div className="no-print bg-slate-100 p-3 border-t border-slate-300 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
           <div className="flex items-center gap-2">
             <span className="text-slate-500">Current Validation State:</span>
             <span

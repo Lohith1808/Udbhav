@@ -33,6 +33,7 @@ import {
   getBriefs,
   getAllSafetyValidations,
 } from '../../../lib/db';
+import { centralSyncService } from '../../../services/centralSyncService';
 import { TrancheReleaseModal } from './TrancheReleaseModal';
 import { StatutoryCSRAuditModal } from './StatutoryCSRAuditModal';
 import { TwoTierSafetyGateModal } from './TwoTierSafetyGateModal';
@@ -103,6 +104,13 @@ export const CSREscrowDashboard: React.FC<CSREscrowDashboardProps> = ({
       setTeams(allStudentTeams);
       setBriefs(allBriefs);
       setSafetyValidations(allSafety);
+
+      // Keep open modal inspect data live if remote sync occurs
+      setSelectedGrant((prev) => {
+        if (!prev) return null;
+        const refreshed = allGrants.find((g) => g.id === prev.id);
+        return refreshed || prev;
+      });
     } catch (err) {
       console.error('Failed to load CSR escrow dashboard data:', err);
     } finally {
@@ -110,8 +118,34 @@ export const CSREscrowDashboard: React.FC<CSREscrowDashboardProps> = ({
     }
   };
 
+  // Sync selectedTranche whenever selectedGrant is refreshed
+  useEffect(() => {
+    if (selectedGrant && selectedTranche) {
+      const refreshedTranche = selectedGrant.tranches.find((t) => t.stage === selectedTranche.stage);
+      if (refreshedTranche) {
+        setSelectedTranche(refreshedTranche);
+      }
+    }
+  }, [selectedGrant]);
+
   useEffect(() => {
     loadData();
+
+    // Cross-Device Mesh Broadcast Listener (Task 7.1)
+    const unsubscribe = centralSyncService.subscribe((msg) => {
+      const payload = msg.payload as { type?: string; grantId?: string } | undefined;
+      if (
+        msg.type === 'TRANCHE_DISBURSED' ||
+        (msg.type === 'RECORD_UPDATED' && payload?.type === 'ESCROW_UPDATED') ||
+        msg.type === 'DATABASE_FULL_SYNC'
+      ) {
+        loadData();
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
   }, []);
 
   // Locate the Dumka challenge safety record
@@ -166,8 +200,8 @@ export const CSREscrowDashboard: React.FC<CSREscrowDashboardProps> = ({
               </h3>
               <p className="text-xs text-slate-300">
                 {language === 'hi'
-                  ? 'एमसीए शेड्यूल सात एवं एसडीजी-अलाइन एस्क्रो: 30% बीओएम + 30% लैब बेंच + 40% फील्ड पायलट सत्यापन द्वार।'
-                  : 'MCA Schedule VII & SDG-Aligned Escrow: 30% BOM + 30% Lab Telemetry + 40% Dual-Signed Field Handover.'}
+                  ? 'एमसीए शेड्यूल सात एवं एसडीजी-अलाइन एस्क्रो: 30% बीओएम + 40% लैब टेलीमेट्री + 30% दोहरे-हस्ताक्षरित फील्ड हैंडओवर द्वार।'
+                  : 'MCA Schedule VII & SDG-Aligned Escrow: 30% BOM + 40% Lab Prototype Telemetry + 30% Dual-Signed Field Handover.'}
               </p>
             </div>
           </div>
@@ -511,17 +545,23 @@ export const CSREscrowDashboard: React.FC<CSREscrowDashboardProps> = ({
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
-                      {dumkaSafety && grant.masterIssueId === dumkaSafety.masterIssueId && (
-                        <button
-                          type="button"
-                          onClick={() => setSelectedSafetyVal(dumkaSafety)}
-                          className="px-3 py-1.5 bg-[#1E6F50] hover:bg-[#16563e] text-white text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
-                          title="Inspect Two-Tier Safety Gate & Pilot QR Clearance"
-                        >
-                          <ShieldCheck className="w-3.5 h-3.5 text-[#F8E7A2]" />
-                          <span>Safety Gate &amp; Pilot QR</span>
-                        </button>
-                      )}
+                      {(() => {
+                        const grantSafety =
+                          safetyValidations.find(
+                            (s) => s.masterIssueId === grant.masterIssueId || s.teamId === grant.teamId
+                          ) || dumkaSafety;
+                        return grantSafety ? (
+                          <button
+                            type="button"
+                            onClick={() => setSelectedSafetyVal(grantSafety)}
+                            className="px-3 py-1.5 bg-[#1E6F50] hover:bg-[#16563e] text-white text-xs font-bold uppercase transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+                            title="Inspect Two-Tier Safety Gate & Pilot QR Clearance"
+                          >
+                            <ShieldCheck className="w-3.5 h-3.5 text-[#F8E7A2]" />
+                            <span>Safety Gate &amp; Pilot QR</span>
+                          </button>
+                        ) : null;
+                      })()}
 
                       <button
                         type="button"
@@ -551,8 +591,20 @@ export const CSREscrowDashboard: React.FC<CSREscrowDashboardProps> = ({
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-1">
                       {grant.tranches.map((tranche, idx) => {
                         const isDisbursed = tranche.status === 'DISBURSED';
-                        const isApproved = tranche.status === 'APPROVED';
                         const isDisputed = tranche.status === 'DISPUTED';
+
+                        // Sequential pipeline lock logic
+                        const t1 = grant.tranches[0];
+                        const t2 = grant.tranches[1];
+                        const isPipelineLocked =
+                          (idx === 1 && t1?.status !== 'DISBURSED') ||
+                          (idx === 2 && t2?.status !== 'DISBURSED');
+
+                        const hasFacultySignoff = Boolean(tranche.facultySignoffAt);
+                        const hasPanchayatSignoff = Boolean(
+                          tranche.panchayatSignoffAt || tranche.govtSignoffAt
+                        );
+                        const hasDualSignoffs = hasFacultySignoff && hasPanchayatSignoff;
 
                         return (
                           <button
@@ -564,15 +616,22 @@ export const CSREscrowDashboard: React.FC<CSREscrowDashboardProps> = ({
                                 ? 'bg-emerald-50/60 border-emerald-600 hover:bg-emerald-100/70'
                                 : isDisputed
                                 ? 'bg-red-50/60 border-red-600 hover:bg-red-100/70'
-                                : isApproved
-                                ? 'bg-blue-50/60 border-blue-600 hover:bg-blue-100/70'
+                                : isPipelineLocked
+                                ? 'bg-slate-100/80 border-slate-300 hover:border-slate-400 opacity-90'
+                                : idx === 2 && hasDualSignoffs
+                                ? 'bg-blue-50/70 border-blue-500 hover:bg-blue-100/70'
                                 : 'bg-white border-slate-300 hover:border-slate-500'
                             }`}
                           >
                             <div>
                               <div className="flex items-center justify-between text-xs">
                                 <span className="font-black text-[#0B2545]">
-                                  Stage {idx + 1}: {tranche.stage === 'TRANCHE_1_BOM' ? 'BOM' : tranche.stage === 'TRANCHE_2_LAB' ? 'Lab Telemetry' : 'Field Pilot'}
+                                  Stage {idx + 1}:{' '}
+                                  {tranche.stage === 'TRANCHE_1_BOM'
+                                    ? 'BOM Architecture'
+                                    : tranche.stage === 'TRANCHE_2_LAB'
+                                    ? 'Lab Telemetry'
+                                    : 'Field Handover'}
                                 </span>
                                 <span className="font-mono font-bold text-slate-700">
                                   {tranche.percentage}%
@@ -600,15 +659,44 @@ export const CSREscrowDashboard: React.FC<CSREscrowDashboardProps> = ({
                                   <AlertTriangle className="w-3 h-3 text-red-700" />
                                   <span>Disputed</span>
                                 </span>
-                              ) : isApproved ? (
-                                <span className="font-bold text-blue-800 flex items-center gap-1 uppercase">
-                                  <Clock className="w-3 h-3 text-blue-700" />
-                                  <span>Approved</span>
-                                </span>
-                              ) : (
-                                <span className="font-bold text-slate-500 flex items-center gap-1 uppercase">
+                              ) : isPipelineLocked ? (
+                                <span
+                                  className="font-bold text-slate-500 flex items-center gap-1 uppercase"
+                                  title={
+                                    idx === 1
+                                      ? 'Locked (Awaiting Tranche 1 BOM Disbursement)'
+                                      : 'Locked (Awaiting Tranche 2 Lab Telemetry Disbursement)'
+                                  }
+                                >
                                   <Lock className="w-3 h-3 text-slate-400" />
-                                  <span>Locked</span>
+                                  <span>Locked (Pipeline)</span>
+                                </span>
+                              ) : idx === 2 ? (
+                                hasDualSignoffs ? (
+                                  <span className="font-bold text-blue-800 flex items-center gap-1 uppercase">
+                                    <CheckCircle2 className="w-3 h-3 text-blue-700" />
+                                    <span>Dual-Signed (Ready)</span>
+                                  </span>
+                                ) : hasFacultySignoff ? (
+                                  <span className="font-bold text-amber-800 flex items-center gap-1 uppercase">
+                                    <Clock className="w-3 h-3 text-amber-700" />
+                                    <span>1/2 Signed (Need BDO)</span>
+                                  </span>
+                                ) : hasPanchayatSignoff ? (
+                                  <span className="font-bold text-amber-800 flex items-center gap-1 uppercase">
+                                    <Clock className="w-3 h-3 text-amber-700" />
+                                    <span>1/2 Signed (Need Faculty)</span>
+                                  </span>
+                                ) : (
+                                  <span className="font-bold text-slate-500 flex items-center gap-1 uppercase">
+                                    <Lock className="w-3 h-3 text-slate-400" />
+                                    <span>Dual-Lock Required</span>
+                                  </span>
+                                )
+                              ) : (
+                                <span className="font-bold text-amber-800 flex items-center gap-1 uppercase">
+                                  <Lock className="w-3 h-3 text-amber-700" />
+                                  <span>Locked (Ready to Sign)</span>
                                 </span>
                               )}
 
@@ -659,7 +747,9 @@ export const CSREscrowDashboard: React.FC<CSREscrowDashboardProps> = ({
           brief={
             briefs.find(
               (b) => b.id === (teams.find((t) => t.id === dossierGrant.teamId)?.briefId || '')
-            ) || null
+            ) ||
+            briefs.find((b) => b.masterIssueId === dossierGrant.masterIssueId) ||
+            null
           }
           language={language}
         />

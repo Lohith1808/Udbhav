@@ -29,13 +29,15 @@ export interface MilestoneTranche {
   status: EscrowStatus;
   deliverableDescription: string;
   deliverableProofUrl?: string;
-  facultySignoffAt?: number;
+  telemetryUrl?: string;
+  handoverNotes?: string;
+  facultySignoffAt?: number | string;
   facultySignoffBy?: string;
-  panchayatSignoffAt?: number;
+  panchayatSignoffAt?: number | string;
   panchayatSignoffBy?: string;
-  govtSignoffAt?: number;
+  govtSignoffAt?: number | string;
   govtSignoffBy?: string;
-  disbursedAt?: number;
+  disbursedAt?: number | string;
   rejectionReason?: string;
 }
 

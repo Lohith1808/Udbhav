@@ -16,9 +16,16 @@ import {
   endorseSubmission,
   rejectSubmission,
   saveEngineeringBrief,
+  getSafetyValidation,
+  getSafetyValidationByMasterIssueId,
 } from './lib/db';
 import { generateProblemBoundaryBrief } from './features/solver';
 import { EngineeringProblemBrief, StudentTeam, FacultyMentorProfile, BriefStatus, PanchayatTechnicalQuery } from './types/solver';
+import { SafetyValidation } from './types/governance';
+
+const TwoTierSafetyGateModal = React.lazy(
+  () => import('./features/governance/components/TwoTierSafetyGateModal')
+);
 
 const ProblemBriefModal = React.lazy(
   () => import('./features/solver/components/ProblemBriefModal')
@@ -44,8 +51,8 @@ const PanchayatEndorsementModal = React.lazy(
 const CSREscrowDashboard = React.lazy(
   () => import('./features/governance/components/CSREscrowDashboard')
 );
-const StatewideGISCommandDashboard = React.lazy(
-  () => import('./features/governance/components/StatewideGISCommandDashboard')
+const StateGISCommandDashboard = React.lazy(
+  () => import('./features/governance/components/StateGISCommandDashboard')
 );
 import {
   createOfflineDraftSubmission,
@@ -257,6 +264,9 @@ const AppContent: React.FC = () => {
     team: StudentTeam | null;
   } | null>(null);
 
+  // State for Two-Tier Safety Gate & Public Pilot Pass (Task 7.2)
+  const [selectedSafetyValForView, setSelectedSafetyValForView] = useState<SafetyValidation | null>(null);
+
   // Reactive IndexedDB queries
   const allSubmissions = useLiveQuery(() => db.draftSubmissions.toArray(), [], []);
   const queuedSubmissions = useLiveQuery(
@@ -400,7 +410,11 @@ const AppContent: React.FC = () => {
           brief?: EngineeringProblemBrief;
           team?: StudentTeam;
           mentor?: FacultyMentorProfile;
+          grantId?: string;
         };
+        if (payload?.type === 'ESCROW_UPDATED' || payload?.type === 'escrow_grant') {
+          await centralSyncService.syncWithRemoteHub();
+        }
         if (payload?.team) {
           await db.studentTeams.put(payload.team);
         }
@@ -527,6 +541,20 @@ const AppContent: React.FC = () => {
           type: 'info',
         });
         setTimeout(() => setStatusNotification(null), 4500);
+      } else if (msg.type === 'TRANCHE_DISBURSED') {
+        const payload = msg.payload as {
+          grantId?: string;
+          trancheIndex?: number;
+          amountINR?: number;
+        };
+        setStatusNotification({
+          text:
+            language === 'hi'
+              ? `सीएसआर एस्क्रो किस्त ${payload?.trancheIndex !== undefined ? payload.trancheIndex + 1 : ''} (₹${(payload?.amountINR || 0).toLocaleString('en-IN')}) संवितरित!`
+              : `CSR Escrow Tranche ${payload?.trancheIndex !== undefined ? payload.trancheIndex + 1 : ''} (₹${(payload?.amountINR || 0).toLocaleString('en-IN')}) disbursed successfully!`,
+          type: 'success',
+        });
+        setTimeout(() => setStatusNotification(null), 5000);
       } else if (msg.type === 'DATABASE_FULL_SYNC') {
         setStatusNotification({
           text:
@@ -1727,6 +1755,36 @@ const AppContent: React.FC = () => {
                                   <GraduationCap className="w-3.5 h-3.5 text-amber-300" />
                                   <span>{language === 'hi' ? 'मेंटर अनुरोध' : 'Request Mentor'}</span>
                                 </button>
+
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    const associatedTeam = (allTeams || []).find((t) => t.briefId === b.id) || null;
+                                    const safety =
+                                      (await getSafetyValidationByMasterIssueId(b.masterIssueId)) ||
+                                      (associatedTeam ? await getSafetyValidation(associatedTeam.id) : undefined) ||
+                                      {
+                                        id: `SAFE-JH-2026-${b.id.slice(-3).toUpperCase()}`,
+                                        masterIssueId: b.masterIssueId,
+                                        teamId: associatedTeam?.id || `TEAM-${b.id}`,
+                                        tier1FacultyPassed: false,
+                                        tier2EvaluatorAgency: 'CSIR_CIMFR_DHANBAD',
+                                        tier2BisPassed: false,
+                                        tier2BisStandardCode: 'IS 10500:2012 Drinking Water Specification',
+                                        isPublicPilotCleared: false,
+                                      };
+                                    setSelectedSafetyValForView(safety);
+                                  }}
+                                  className="px-2.5 py-1.5 bg-[#1E6F50] hover:bg-[#16563e] text-white text-xs font-bold uppercase rounded-none transition-colors inline-flex items-center gap-1 cursor-pointer shadow-2xs"
+                                  title="Inspect Two-Tier BIS Safety Gate & DC Public Pilot Pass"
+                                >
+                                  <ShieldCheck className="w-3.5 h-3.5 text-[#F8E7A2]" />
+                                  <span>
+                                    {language === 'hi'
+                                      ? 'सुरक्षा द्वार व परमिट'
+                                      : 'Safety Gate & Pass'}
+                                  </span>
+                                </button>
                               </div>
                             )}
                           </div>
@@ -1776,15 +1834,15 @@ const AppContent: React.FC = () => {
             />
           </React.Suspense>
         ) : activeNavTab === 'gis' ? (
-          /* Statewide GIS Command & Governance Desk (Shoe 5 - Task 3.5) */
+          /* Statewide GIS Executive Command & Analytics Console (Sprint 7 - Task 7.4) */
           <React.Suspense
             fallback={
-              <div className="p-8 text-center text-slate-500 bg-white border border-slate-300">
-                Loading Statewide GIS Command Portal...
+              <div className="p-8 text-center text-slate-500 bg-white border border-slate-300 font-mono text-xs">
+                Loading Statewide GIS Command &amp; Analytics Console...
               </div>
             }
           >
-            <StatewideGISCommandDashboard
+            <StateGISCommandDashboard
               userRole={simulatedRole}
               onRoleChange={setSimulatedRole}
               language={language}
@@ -2419,6 +2477,19 @@ const AppContent: React.FC = () => {
               });
               setTimeout(() => setStatusNotification(null), 4000);
             }}
+          />
+        </React.Suspense>
+      )}
+
+      {/* Two-Tier Safety Gate & Public Pilot Pass Modal (Task 7.2) */}
+      {selectedSafetyValForView && (
+        <React.Suspense fallback={null}>
+          <TwoTierSafetyGateModal
+            isOpen={Boolean(selectedSafetyValForView)}
+            onClose={() => setSelectedSafetyValForView(null)}
+            safetyValidation={selectedSafetyValForView}
+            onValidationUpdated={() => {}}
+            language={language}
           />
         </React.Suspense>
       )}
